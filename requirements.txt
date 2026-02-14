@@ -1,0 +1,11 @@
+pywin32
+mss
+numpy
+opencv-python
+pytesseract
+pyautogui
+pyyaml
+psutil
+pywinauto
+
+

@@ -1,0 +1,6 @@
+venv/
+build/
+logs/
+dist/
+*.zip
+*.spec
