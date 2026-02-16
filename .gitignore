@@ -5,3 +5,7 @@ build/
 venv/
 __pycache__/
 logs/
+*.exe
+*.dll
+WatchdogDeploy/
+third_party/
