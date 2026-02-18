@@ -14,8 +14,8 @@ def main():
             print(f"⚠️  Error: {e}")
             print("   Continuing anyway...")
         
-        print("💤 Sleeping 20 min...")
-        time.sleep(20 * 60)
+        print("💤 Sleeping 10 min...")
+        time.sleep(10 * 60)
 
 if __name__ == "__main__":
     main()

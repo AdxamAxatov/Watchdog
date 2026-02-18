@@ -12,8 +12,8 @@ button_point_pct:
 #   x: 0.4317    # Right side (scroll bar is usually at 90-98%)
 #   y: 0.0499   # Bottom of scroll area (usually 90-98%)
 log_scroll_point_pct:
-  x: 0.95   # Scroll bar (right)
-  y: 0.08   # TOP (latest messages here!)
+  x: 0.4327   # Scroll bar (right)
+  y: 0.0499   # TOP (latest messages here!)
   
 # Legacy absolute pixel regions (kept for reference)
 # log_region:
@@ -30,12 +30,7 @@ panel:
   dir: "C:/Users/Recruiter/Downloads/FSM_PANEL v.2.8.0"
   
   first_run:
-    # How long to wait for first-run screen (optional)
     initial_wait_seconds: 10
-    
-    # OCR detection - make this OPTIONAL since we're forcing clicks
-    detect_region: { x: 0.20, y: 0.15, w: 0.60, h: 0.25 }
-    keywords: ["welcome", "get started", "next", "continue", "allow"]
     force_on_ocr_fail: true  # If OCR fails, run clicks anyway
     
     # The actual clicks
@@ -50,8 +45,8 @@ steam_route:
   launch_with_panel: true
 
 paths:
-  expressvpn_exe:
-    - "C:/Program Files (x86)/ExpressVPN/expressvpn-ui/ExpressVPN.exe"
+  # expressvpn_exe:
+  #   - "C:/Program Files (x86)/ExpressVPN/expressvpn-ui/ExpressVPN.exe"
 
   memreduct_exe:
     - "C:/Program Files/Mem Reduct/MemReduct.exe"
@@ -68,3 +63,11 @@ rdp:
     y: 0.3300
   ui_wait_s: 5.0
   dialog_wait_s: 1.0    
+
+rdp_windows:
+  # Size for each RDP game window (SixFarmers15, SixFarmers16)
+  width: 1616   # Width in pixels
+  height: 939  # Height in pixels
+  
+  # Window search term
+  title_search: "SinFermera"
