@@ -13,6 +13,8 @@ import pyautogui
 import numpy as np
 import cv2
 import subprocess
+import psutil
+import win32console
 import csv
 import io
 import win32process
@@ -65,6 +67,9 @@ def normalize_text_for_parsing(text: str) -> str:
     text = text.replace("｜", "|")  # Full-width pipe
     text = text.replace("¦", "|")   # Broken bar
     text = text.replace("丨", "|")  # CJK vertical line
+    
+    # CRITICAL FIX: OCR reads colon as period
+    text = re.sub(r'\b(\d{1,2})\.(\d{1,2})\b', r'\1:\2', text)
     
     # IMPROVED: Handle "I" and "l" as pipe in timestamp context
     # Matches patterns like: "08:15I msg", "08:15 I msg", "8:5I msg"
@@ -676,8 +681,150 @@ def find_window_by_process_path(dir_substring: str) -> Tuple[Optional[int], Opti
     return matches[0] if matches else (None, None)
 
 
+
+
+def restart_explorer(log=None):
+    """Restart Windows Explorer when 'Cannot add' is detected"""
+    import subprocess
+    import psutil
+    import win32console
+    
+    print("🔄 Restarting Explorer...")
+    if log:
+        log.warning("Restarting explorer.exe - 'Cannot add' detected")
+    
+    try:
+        subprocess.run(
+            ["taskkill", "/F", "/IM", "explorer.exe"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10
+        )
+        time.sleep(1)
+        
+        subprocess.Popen(["explorer.exe"], shell=False)
+        time.sleep(2)
+        
+        print("✅ Explorer restarted")
+        if log:
+            log.info("Explorer restarted")
+        
+    except Exception as e:
+        print(f"❌ Failed: {e}")
+        if log:
+            log.error("Explorer restart failed: %s", e)
+
+
+def count_cs2_instances():
+    """Count how many CS2 (cs2.exe) instances are running"""
+    count = 0
+    for proc in psutil.process_iter(['name']):
+        try:
+            if proc.info['name'] and proc.info['name'].lower() == 'cs2.exe':
+                count += 1
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+    return count
+
+
+def check_cs2_instance_count(hwnd, regions, expected=4, log=None):
+    """
+    Check if exactly 4 CS2 instances running.
+    If not, click kill_all_cs2 button and re-run first-run clicks.
+    """
+    count = count_cs2_instances()
+    print(f"🎮 CS2: {count}/{expected}")
+    
+    if count == expected:
+        print(f"   ✅ Correct")
+        if log:
+            log.info("CS2 count correct: %d", count)
+        return True
+    
+    print(f"   ❌ Wrong! Expected {expected}, found {count}")
+    if log:
+        log.warning("CS2 count wrong: %d (expected %d)", count, expected)
+    
+    print("\n   🔧 Clicking kill_all_cs2...")
+    kill_button = regions.get("kill_all_cs2_point_pct")
+    if not kill_button:
+        print("   ❌ kill_all_cs2_point_pct not in regions.yaml!")
+        if log:
+            log.error("kill_all_cs2_point_pct not configured")
+        return False
+    
+    try:
+        win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+        win32gui.SetForegroundWindow(hwnd)
+        time.sleep(0.5)
+        
+        cl, ct, cr, cb = win32gui.GetClientRect(hwnd)
+        cx, cy = client_origin_screen(hwnd)
+        x_pct = float(kill_button["x"])
+        y_pct = float(kill_button["y"])
+        x = cx + int((cr - cl) * x_pct)
+        y = cy + int((cb - ct) * y_pct)
+        
+        pyautogui.moveTo(x, y, duration=0.15)
+        pyautogui.click()
+        print("   ✅ Clicked")
+        
+        print("   ⏳ Waiting 10s...")
+        time.sleep(10)
+        
+        print("   🔄 Re-running first-run...")
+        run_panel_first_run_if_needed(hwnd, regions, log=log, force=True)
+        print("   ✅ Done")
+        
+        return False
+        
+    except Exception as e:
+        print(f"   ❌ Failed: {e}")
+        if log:
+            log.error("CS2 fix failed: %s", e)
+        return False
+
+
+def reposition_console_window():
+    """Reposition console to bottom-left corner"""
+    try:
+        import ctypes
+        import win32console
+        
+        console_hwnd = win32console.GetConsoleWindow()
+        if not console_hwnd:
+            return
+        
+        screen_width = ctypes.windll.user32.GetSystemMetrics(0)
+        screen_height = ctypes.windll.user32.GetSystemMetrics(1)
+        
+        console_width = 800
+        console_height = 400
+        
+        x = 0
+        y = screen_height - console_height
+        
+        print(f"📐 Repositioning console to bottom-left ({x}, {y})...")
+        
+        win32gui.SetWindowPos(
+            console_hwnd,
+            win32con.HWND_TOP,
+            x, y,
+            console_width, console_height,
+            win32con.SWP_SHOWWINDOW
+        )
+        
+        print("✅ Console repositioned\n")
+        
+    except Exception as e:
+        print(f"⚠️  Console reposition failed: {e}\n")
+
 def run_watchdog() -> None:
     log = setup_logger()
+    
+    # Reposition console BEFORE launching anything
+    reposition_console_window()
+    
     app = load_yaml(APP_CFG_PATH)
 
     title_sub = app["window"]["title_substring"]
@@ -706,6 +853,8 @@ def run_watchdog() -> None:
     last_logged_latest_line = None
     steam_route_launched = False
     first_run_completed_pids = set()  # Track PIDs we've already run first-run on
+    cs2_check_timestamp = None
+    cs2_check_done = False
 
     print("\n" + "="*70)
     print("🐕 APPLICATION WATCHDOG STARTED")
@@ -825,17 +974,39 @@ def run_watchdog() -> None:
                         print(f"✅ First-run already completed for this panel instance (PID: {pid})")
                         log.info("First-run already completed for PID %d", pid)
                     else:
-                        # Run first-run setup
-                        success = run_panel_first_run_if_needed(hwnd, regions, log=log, force=True)
+                        # Run first-run with retry logic (3 attempts)
+                        success = False
+                        max_attempts = 3
                         
-                        # Only mark as completed if successful
-                        if success:
-                            first_run_completed_pids.add(pid)
-                            print(f"✅ Marked PID {pid} as first-run completed")
-                            log.info("First-run completed for PID %d", pid)
-                        else:
-                            print(f"⚠️  First-run clicks failed, will retry next time")
-                            log.warning("First-run clicks failed for PID %d", pid)
+                        for attempt in range(1, max_attempts + 1):
+                            print(f"\n🔄 Attempt {attempt}/{max_attempts}")
+                            log.info("First-run attempt %d/%d for PID %d", attempt, max_attempts, pid)
+                            
+                            success = run_panel_first_run_if_needed(hwnd, regions, log=log, force=True)
+                            
+                            if success:
+                                first_run_completed_pids.add(pid)
+                                
+                                # Set CS2 check for 5 min from now
+                                if cs2_check_timestamp is None:
+                                    cs2_check_timestamp = time.time() + (5 * 60)
+                                    print(f"⏰ CS2 check in 5 min")
+                                    if log:
+                                        log.info("CS2 check scheduled for 5 min")
+                                
+                                print(f"✅ Completed (attempt {attempt})")
+                                log.info("First-run completed for PID %d", pid)
+                                break
+                            else:
+                                print(f"⚠️ Attempt {attempt} failed")
+                                log.warning("Attempt %d failed for PID %d", attempt, pid)
+                                
+                                if attempt < max_attempts:
+                                    print(f"   ⏳ Retry in 5s")
+                                    time.sleep(5)
+                                else:
+                                    print(f"❌ All {max_attempts} attempts failed!")
+                                    log.error("All attempts failed for PID %d", pid)
                         
                 except Exception as e:
                     log.warning("Could not get PID for first-run tracking: %s", e)
@@ -925,6 +1096,12 @@ def run_watchdog() -> None:
                 # Logic Analysis
         # Logic Analysis (1st pass)
         minutes_ago, hh, mm, latest_line, latest_msg = find_latest_entry(text, debug=True)  # Always debug
+        
+
+        # Check for "Cannot add" error (restart explorer)
+        if latest_msg and "cannot add" in latest_msg.lower():
+            print(f"⚠️  'Cannot add' detected: {latest_msg[:50]}")
+            restart_explorer(log=log)
         
         if minutes_ago is None:
             # Retry once using screen-capture fallback (still inside the same loop)
@@ -1035,6 +1212,19 @@ def run_watchdog() -> None:
             # Keep only recent PIDs (last 10)
             if len(first_run_completed_pids) > 10:
                 first_run_completed_pids = set(list(first_run_completed_pids)[-10:])
+        
+
+        # Check CS2 count (5 min after first-run)
+        if cs2_check_timestamp is not None and not cs2_check_done:
+            if time.time() >= cs2_check_timestamp:
+                print("\n" + "=" * 70)
+                print("🎮 CS2 INSTANCE CHECK")
+                print("=" * 70)
+                
+                check_cs2_instance_count(hwnd, regions, expected=4, log=log)
+                
+                cs2_check_done = True
+                print("=" * 70 + "\n")
         
         time.sleep(poll)
 

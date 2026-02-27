@@ -19,12 +19,12 @@ watchdog:
   # Trigger 2: Any message timeout (safety net)
   # If ANY message is older than this (regardless of content), click recovery
   # This catches cases where the original logic might miss failures
-  general_timeout_minutes: 60
+  general_timeout_minutes: 40
   
   # === CORE SETTINGS ===
   
   # How often to check the log (in seconds)
-  poll_seconds: 60         
+  poll_seconds: 180         
   
   # Cooldown: Prevent repeated clicks within this time (in seconds)
   # Prevents multiple recovery attempts if the first one is still processing

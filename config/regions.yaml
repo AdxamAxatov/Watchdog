@@ -9,38 +9,27 @@ button_point_pct:
   y: 0.47771836007130125
 
 # log_scroll_point_pct:
-#   x: 0.4317    # Right side (scroll bar is usually at 90-98%)
-#   y: 0.0499   # Bottom of scroll area (usually 90-98%)
-log_scroll_point_pct:
-  x: 0.4327   # Scroll bar (right)
-  y: 0.0499   # TOP (latest messages here!)
-  
-# Legacy absolute pixel regions (kept for reference)
-# log_region:
-#   x: 234
-#   y: 22
-#   w: 240
-#   h: 24
+#   x: 0.4327   # Scroll bar (right)
+#   y: 0.0499   # TOP (latest messages here!)
 
-# button_point:
-#   x: 633
-#   y: 268
+kill_all_cs2_point_pct:
+  x: 0.8496  
+  y: 0.7094
   
 panel:
-  dir: "C:/Users/Recruiter/Downloads/FSM_PANEL v.2.8.0"
+  dir: "C:/Users/SinFermera/Desktop/FSM_PANEL v.2.7.1"
   
   first_run:
     initial_wait_seconds: 10
     force_on_ocr_fail: true  # If OCR fails, run clicks anyway
     
-    # The actual clicks
     clicks:
       - { x_pct: 0.5747, y_pct: 0.8093, wait_s: 2.0 }  # Click 1
       - { x_pct: 0.5655, y_pct: 0.6631, wait_s: 2.0 }  # Click 2
       - { x_pct: 0.8238, y_pct: 0.7825, wait_s: 2.0 }  # Click 3
 
 steam_route:
-  exe: "C:/Users/Recruiter/Downloads/SteamRouteTool/SteamRouteTool.exe"
+  exe: "C:/Users/SinFermera/Desktop/SteamRouteTool/SteamRouteTool.exe"
   process_name: "SteamRouteTool.exe"  # This is critical for duplicate detection!
   launch_with_panel: true
 
@@ -52,7 +41,7 @@ paths:
     - "C:/Program Files/Mem Reduct/MemReduct.exe"
 
   rdpclient_exe:
-    - "C:/Users/Recruiter/Downloads/RDPClient/RDPClient.exe"
+    - "C:/Users/Farmer7/Downloads/RDPClient/RDPClient/RDPClient.exe"
 
 rdp:
   user1_point_pct:
