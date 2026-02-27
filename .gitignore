@@ -1,11 +1,11 @@
-dist/
-build/
-*.zip
-*.spec
-venv/
-__pycache__/
-logs/
-*.exe
-*.dll
-WatchdogDeploy/
-third_party/
+# dist/
+# build/
+# *.zip
+# *.spec
+# venv/
+# __pycache__/
+# logs/
+# *.exe
+# *.dll
+# WatchdogDeploy/
+# third_party/
