@@ -32,15 +32,8 @@ def run(config=None, context=None):
     win.set_focus()
     time.sleep(0.3)
 
-    # 3) Click Clean #1
     win.child_window(title=CLEAN_TITLE, class_name="Button").click_input()
     time.sleep(1.0)
-
-    # # 4) Click Clean #2
-    # win.set_focus()
-    # time.sleep(0.2)
-    # win.child_window(title=CLEAN_TITLE, class_name="Button").click_input()
-    # time.sleep(0.5)
 
     return True
 

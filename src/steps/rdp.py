@@ -13,6 +13,8 @@ import sys
 from pathlib import Path
 import time
 import subprocess
+import ctypes
+import ctypes.wintypes
 import win32gui
 import win32con
 import win32api
@@ -61,18 +63,32 @@ def setup_logging():
     )
     return logging.getLogger(__name__)
 
-def close_confirmation_dialog(verbose=True):
+def close_confirmation_dialog(hwnd=None, verbose=True):
     """
     Close confirmation dialog by pressing Enter.
+    If hwnd is supplied, skips the press when focus has moved to an unrelated
+    window — prevents accidentally hitting UI elements in other apps.
     """
+    if hwnd is not None:
+        fg = win32gui.GetForegroundWindow()
+        if fg != hwnd:
+            fg_title = win32gui.GetWindowText(fg) if fg else ""
+            # Allow child dialogs (their title won't match TITLE_SUB, but they
+            # belong to the same process).  Only skip if an entirely different
+            # top-level app has grabbed focus.
+            if TITLE_SUB.lower() not in fg_title.lower():
+                if verbose:
+                    print(f"   ⚠️  Focus on unrelated window '{fg_title}' — skipping Enter press")
+                return
+
     if verbose:
         print("   🔘 Pressing Enter to close dialog...")
-    
+
     import pyautogui
     pyautogui.press('enter')
     time.sleep(0.2)
     pyautogui.press('enter')  # Press twice to be sure
-    
+
     if verbose:
         print("   ✅ Sent Enter keypress")
 
@@ -91,7 +107,7 @@ def launch_rdp_with_workdir(exe_path, verbose=True):
     if verbose:
         print(f"🚀 Launching RDPClient")
         print(f"   Exe: {exe_path}")
-        print(f"   Working dir: {rdp_dir}")
+        print(f"   Cwd: {rdp_dir}")
     
     # Launch with working directory set
     subprocess.Popen([exe_path], cwd=rdp_dir)
@@ -136,19 +152,19 @@ def position_window_to_corner(hwnd, corner, window_size=(640, 480)):
         True if successful, False otherwise
     """
     try:
-        # Get screen dimensions
-        screen_width = win32api.GetSystemMetrics(0)
-        screen_height = win32api.GetSystemMetrics(1)
-        
+        # Get usable work area (excludes taskbar regardless of its position)
+        work_area = ctypes.wintypes.RECT()
+        ctypes.windll.user32.SystemParametersInfoW(0x30, 0, ctypes.byref(work_area), 0)
+
         width, height = window_size
-        
-        # Calculate position based on corner
+
+        # Calculate position based on corner, clamped to the work area
         if corner == "top-left":
-            x = 0
-            y = 0
+            x = work_area.left
+            y = work_area.top
         elif corner == "bottom-right":
-            x = screen_width - width
-            y = screen_height - height
+            x = work_area.right - width
+            y = work_area.bottom - height
         else:
             print(f"   ⚠️  Unknown corner: {corner}")
             return False
@@ -331,10 +347,10 @@ def run(config=None, context=None):
             log.info(f"User1: {config['user1_point_pct']}, User2: {config['user2_point_pct']}")
             log.info(f"UI wait: {config['ui_wait_s']}s")
             
-            print(f"✅ Loaded from regions.yaml:")
-            print(f"   Exe: {config['exe_path']}")
-            print(f"   User1: {config['user1_point_pct']}")
-            print(f"   User2: {config['user2_point_pct']}")
+            print(f"✅ Config loaded:")
+            print(f"   Exe:     {config['exe_path']}")
+            print(f"   User1:   {config['user1_point_pct']}")
+            print(f"   User2:   {config['user2_point_pct']}")
             print(f"   UI wait: {config['ui_wait_s']}s")
             
         except Exception as e:
@@ -372,42 +388,41 @@ def run(config=None, context=None):
     m = find_window(TITLE_SUB, require_visible=True)
     if not m:
         log.info("RDPClient window not found, launching...")
-        print("⚠️  RDPClient window not found, launching...")
-        
+        print("⚠️  RDPClient not found, launching...")
+
         # Launch with working directory set (CRITICAL FIX!)
         launch_rdp_with_workdir(exe_path, verbose=True)
-        
+
         log.info("Waiting for RDPClient window (25s timeout)")
-        print("⏳ Waiting for RDPClient window (25s timeout)...")
+        print("⏳ Waiting for window (25s)...")
         m = wait_for_window(TITLE_SUB, timeout_s=25.0, require_visible=True)
 
     if not m:
         log.error("RDPClient window not found after launch")
-        print("❌ RDPClient window not found after launch")
+        print("❌ Window not found after launch")
         raise RuntimeError("RDP: window not found after launch.")
 
     log.info(f"Found RDPClient Window (HWND: {m.hwnd}, Title: {m.title})")
-    print(f"\n✅ Found RDPClient Window")
-    print(f"   HWND: {m.hwnd}")
+    print(f"\n✅ RDPClient window found")
+    print(f"   HWND:  {m.hwnd}")
     print(f"   Title: {m.title}")
 
     # 2) Wait for UI and user list to fully load
     log.info(f"Waiting {ui_wait_s}s for UI and user list to load")
-    print(f"\n⏳ Waiting {ui_wait_s}s for UI and user list to load...")
-    print("   (This allows time for user accounts JSON to be read)")
+    print(f"\n⏳ Waiting {ui_wait_s}s for UI...")
     time.sleep(ui_wait_s)
 
     # 3) Force focus before first click
     log.info("Focusing RDPClient window")
-    print("\n🎯 Focusing RDPClient window...")
+    print("\n🎯 Focusing RDPClient...")
     if not force_foreground(m.hwnd):
         log.error("Failed to focus RDPClient")
         print("❌ Failed to focus RDPClient")
         raise RuntimeError("RDP: could not foreground (safety stop).")
-    
+
     assert_foreground(m.hwnd)
     log.info("Window focused")
-    print("✅ Window focused")
+    print("✅ Focused")
     
     time.sleep(0.3)
 
@@ -415,31 +430,30 @@ def run(config=None, context=None):
     x1, y1 = pct_to_screen_xy(m.hwnd, float(user1["x"]), float(user1["y"]))
     
     log.info(f"Double-clicking User1 at ({user1['x']:.4f}, {user1['y']:.4f}) → screen ({x1}, {y1})")
-    print(f"\n🖱️  Double-clicking User1")
-    print(f"   Position: ({user1['x']:.4f}, {user1['y']:.4f}) → screen ({x1}, {y1})")
-    
+    print(f"\n🖱️  Double-clicking User1  ({user1['x']:.4f}, {user1['y']:.4f}) → ({x1}, {y1})")
+
     safe_double_click(x1, y1)
     log.info("User1 double-clicked")
-    print("✅ User1 double-clicked")
-    
+    print("✅ User1 clicked")
+
     # 4a) Close confirmation dialog
     log.info(f"Waiting {dialog_wait_s}s for User1 confirmation dialog")
-    print(f"\n⏳ Waiting {dialog_wait_s}s for confirmation dialog...")
+    print(f"⏳ Waiting {dialog_wait_s}s for dialog...")
     time.sleep(dialog_wait_s)
-    close_confirmation_dialog(verbose=True)
+    close_confirmation_dialog(hwnd=m.hwnd, verbose=True)
     time.sleep(0.5)
 
     # 5) Refocus RDPClient for second click
     log.info("Re-focusing RDPClient window")
-    print("\n🎯 Re-focusing RDPClient window...")
+    print("\n🎯 Re-focusing RDPClient...")
     if not force_foreground(m.hwnd):
         log.error("Failed to re-focus RDPClient after User1")
-        print("❌ Failed to re-focus RDPClient after User1")
+        print("❌ Re-focus failed after User1")
         raise RuntimeError("RDP: could not refocus after user1 (safety stop).")
-    
+
     assert_foreground(m.hwnd)
     log.info("Window re-focused")
-    print("✅ Window re-focused")
+    print("✅ Re-focused")
     
     time.sleep(0.3)
 
@@ -447,18 +461,17 @@ def run(config=None, context=None):
     x2, y2 = pct_to_screen_xy(m.hwnd, float(user2["x"]), float(user2["y"]))
     
     log.info(f"Double-clicking User2 at ({user2['x']:.4f}, {user2['y']:.4f}) → screen ({x2}, {y2})")
-    print(f"\n🖱️  Double-clicking User2")
-    print(f"   Position: ({user2['x']:.4f}, {user2['y']:.4f}) → screen ({x2}, {y2})")
-    
+    print(f"\n🖱️  Double-clicking User2  ({user2['x']:.4f}, {user2['y']:.4f}) → ({x2}, {y2})")
+
     safe_double_click(x2, y2)
     log.info("User2 double-clicked")
-    print("✅ User2 double-clicked")
-    
+    print("✅ User2 clicked")
+
     # 6a) Close confirmation dialog
     log.info(f"Waiting {dialog_wait_s}s for User2 confirmation dialog")
-    print(f"\n⏳ Waiting {dialog_wait_s}s for confirmation dialog...")
+    print(f"⏳ Waiting {dialog_wait_s}s for dialog...")
     time.sleep(dialog_wait_s)
-    close_confirmation_dialog(verbose=True)
+    close_confirmation_dialog(hwnd=m.hwnd, verbose=True)
     time.sleep(0.5)
 
     log.info("RDPCLIENT AUTOMATION COMPLETE - Both RDP sessions opening")

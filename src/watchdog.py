@@ -15,16 +15,15 @@ import cv2
 import subprocess
 import psutil
 import win32console
-import csv
-import io
 import win32process
 import win32ui
-from ctypes import windll
+from ctypes import windll, byref, wintypes
 
 from ocr import ocr_log_text
 from utils import load_yaml, setup_logger
 from window_connector import find_hwnd_by_title_substring
 from layout import normalize_window_bottom_right
+from winops import _query_full_process_image_name
 from pathlib import Path
 
 
@@ -210,30 +209,21 @@ def scroll_logbox_to_top(hwnd: int, regions: dict, verbose: bool = True) -> bool
         x = cx + int(cw * x_pct)
         y = cy + int(ch * y_pct)
         
-        print(f"📜 Scrolling to TOP (where latest messages are)...")
-        print(f"   Position: ({x_pct:.2f}, {y_pct:.2f}) → screen ({x}, {y})")
-        
+        print(f"📜 Scrolling to top ({x}, {y})...")
+
         # Focus window first
         win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
         win32gui.SetForegroundWindow(hwnd)
         time.sleep(0.3)
-        
-        # VISUAL: Move mouse slowly so you can see it
-        print(f"   🖱️  Moving mouse to scroll bar...")
-        pyautogui.moveTo(x, y, duration=0.5)  # Slow move (0.5s) for visibility
-        time.sleep(0.2)  # Pause so you can see where it is
-        
-        # Double-click scroll bar to jump to TOP
-        print(f"   🖱️  Double-clicking scroll bar...")
+
+        pyautogui.moveTo(x, y, duration=0.5)
+        time.sleep(0.2)
         pyautogui.doubleClick()
-        
-        # Wait for scroll animation
-        print(f"   ⏳ Waiting for scroll animation...")
-        time.sleep(0.5)  # Longer wait to see scroll happen
-        
-        print(f"   ✅ Scroll complete!")
+        time.sleep(0.5)
+
+        print(f"   ✅ Scrolled")
         return True
-        
+
     except Exception as e:
         print(f"   ❌ Scroll failed: {e}")
         return False
@@ -254,24 +244,24 @@ def run_panel_first_run_if_needed(hwnd: int, regions: dict, log=None, force: boo
 
     # Wait AFTER launch so UI has time to show onboarding
     initial_wait = fr.get("initial_wait_seconds", 10)
-    print(f"⏳ Waiting {initial_wait}s for first-run screen...")
+    print(f"⏳ Waiting {initial_wait}s for first-run UI...")
     time.sleep(initial_wait)
 
     # CRITICAL FIX: Force focus with verification
-    print("🎯 Forcing window to foreground...")
+    print("🎯 Focusing window...")
     for attempt in range(3):
         try:
             win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
             win32gui.SetForegroundWindow(hwnd)
             time.sleep(0.5)
-            
+
             # VERIFY focus was gained
             fg = win32gui.GetForegroundWindow()
             if fg == hwnd:
-                print("   ✅ Window focused successfully")
+                print("   ✅ Focused")
                 break
             else:
-                print(f"   ⚠️  Focus attempt {attempt+1}/3 failed, retrying...")
+                print(f"   ⚠️  Focus {attempt+1}/3 failed, retrying...")
                 if attempt < 2:
                     win32gui.BringWindowToTop(hwnd)
                     time.sleep(0.3)
@@ -283,7 +273,7 @@ def run_panel_first_run_if_needed(hwnd: int, regions: dict, log=None, force: boo
     
     # Final verification
     if win32gui.GetForegroundWindow() != hwnd:
-        print("❌ Failed to focus window after 3 attempts")
+        print("❌ Focus failed after 3 attempts")
         if log:
             log.error("Could not focus panel window for first-run clicks")
         return False  # Failed
@@ -315,11 +305,11 @@ def run_panel_first_run_if_needed(hwnd: int, regions: dict, log=None, force: boo
 
     if not should_click:
         if log: log.info("Panel first-run NOT detected, skipping clicks.")
-        print("⏭️  First-run screen not detected, skipping clicks")
+        print("⏭️  First-run not detected, skipping")
         return
 
     if log: log.info("Panel first-run detected (or forced). Running clicks...")
-    print(f"🖱️  Running {len(clicks)} first-run click(s)...")
+    print(f"🖱️  Running {len(clicks)} first-run click(s)")
 
     # click sequence (pct coords)
     cl, ct, cr, cb = win32gui.GetClientRect(hwnd)
@@ -331,24 +321,24 @@ def run_panel_first_run_if_needed(hwnd: int, regions: dict, log=None, force: boo
         # CRITICAL FIX: Re-focus if lost, don't abort
         fg = win32gui.GetForegroundWindow()
         if fg != hwnd:
-            print(f"   ⚠️  Window lost focus before click {i}, re-focusing...")
+            print(f"   ⚠️  Focus lost before click {i}, re-focusing...")
             if log:
                 log.warning("Panel lost focus before click %d, re-focusing", i)
-            
+
             # Try to regain focus
             try:
                 win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
                 win32gui.SetForegroundWindow(hwnd)
                 time.sleep(0.5)
-                
+
                 # Verify we got it back
                 if win32gui.GetForegroundWindow() != hwnd:
-                    print(f"   ❌ Failed to regain focus, aborting remaining clicks")
+                    print(f"   ❌ Could not regain focus, aborting")
                     if log:
                         log.error("Could not regain focus, aborting first-run clicks")
                     return False  # Failed
-                    
-                print(f"   ✅ Focus regained, continuing...")
+
+                print(f"   ✅ Focus regained")
             except Exception as e:
                 if log:
                     log.error("Exception regaining focus: %s", e)
@@ -361,7 +351,7 @@ def run_panel_first_run_if_needed(hwnd: int, regions: dict, log=None, force: boo
         x = cx + int(cw * x_pct)
         y = cy + int(ch * y_pct)
     
-        print(f"   Click {i}/{len(clicks)}: ({x_pct:.4f}, {y_pct:.4f}) -> screen ({x}, {y})")
+        print(f"   Click {i}/{len(clicks)} → screen ({x}, {y})")
         
         # ANTI-SPAM: Use jitter to prevent Windows ignoring repeated clicks
         pyautogui.moveRel(1, 0, duration=0)
@@ -377,30 +367,21 @@ def run_panel_first_run_if_needed(hwnd: int, regions: dict, log=None, force: boo
         if wait_s < min_cooldown:
             time.sleep(min_cooldown - wait_s)
     
-    print("✅ First-run clicks complete!")
+    print("✅ First-run clicks done")
     return True  # Success!
 
 def is_process_running(image_name: str) -> bool:
-    """Windows-only: returns True if a process with this exact image name is running."""
+    """Returns True if a process with this exact image name is running."""
     if not image_name:
         return False
-    try:
-        out = subprocess.check_output(
-            ["tasklist", "/FO", "CSV", "/NH", "/FI", f"IMAGENAME eq {image_name}"],
-            text=True,
-            errors="ignore"
-        )
-        # If no tasks match, tasklist outputs: INFO: No tasks are running...
-        if "No tasks are running" in out:
-            return False
-        # Parse CSV rows; first column is image name
-        reader = csv.reader(io.StringIO(out))
-        for row in reader:
-            if row and row[0].strip('"').lower() == image_name.lower():
+    name_lower = image_name.lower()
+    for proc in psutil.process_iter(['name']):
+        try:
+            if proc.info['name'] and proc.info['name'].lower() == name_lower:
                 return True
-        return False
-    except Exception:
-        return False
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+    return False
 
 def is_panel_running(panel_dir: str) -> bool:
     """
@@ -415,22 +396,29 @@ def is_panel_running(panel_dir: str) -> bool:
         if not d.exists():
             return False
         
-        # Get all .exe filenames in the directory
+        # Check Panel.exe specifically first — avoids false positives from
+        # unrelated exes (installers, updaters) that share the same directory.
+        panel_exe_path = d / "Panel.exe"
+        if panel_exe_path.exists():
+            if is_process_running("Panel.exe"):
+                print(f"   ✅ Panel.exe running")
+                return True
+            return False
+
+        # Panel.exe not present — fall back to checking any exe in the directory
         exes = [exe.name for exe in d.glob("*.exe")]
-        
         if not exes:
             return False
-        
-        # Check if any of them are running
+
         for exe_name in exes:
             if is_process_running(exe_name):
-                print(f"   ✅ Panel process already running: {exe_name}")
+                print(f"   ✅ {exe_name} running")
                 return True
-        
+
         return False
-        
+
     except Exception as e:
-        print(f"   ⚠️  Error checking panel process: {e}")
+        print(f"   ⚠️  Panel check error: {e}")
         return False
 
 
@@ -445,40 +433,39 @@ def launch_steam_route_if_configured(regions, log=None):
     
     # Check if already running
     if proc and is_process_running(proc):
-        print(f"✅ Steam Route already running ({proc}), skipping launch")
+        print(f"✅ SteamRoute already running ({proc})")
         if log: log.info("Steam Route already running (%s). Skipping launch.", proc)
         return
-    
+
     # Validate exe path
     if not exe:
         if log: log.warning("steam_route.launch_with_panel true but steam_route.exe missing")
-        print("⚠️  Steam Route exe not configured in regions.yaml")
+        print("⚠️  SteamRoute exe not configured")
         return
-    
+
     if not os.path.exists(exe):
         if log: log.warning("Steam Route exe not found: %r", exe)
-        print(f"⚠️  Steam Route exe not found: {exe}")
+        print(f"⚠️  SteamRoute exe not found: {exe}")
         return
 
     # Launch it
     try:
-        print(f"🚀 Launching Steam Route: {exe}")
-        
-        # Get working directory for Steam Route
+        print(f"🚀 Launching SteamRoute: {exe}")
+
         exe_dir = os.path.dirname(exe)
-        
+
         subprocess.Popen(
-            [exe], 
+            [exe],
             cwd=exe_dir,
             shell=False
         )
-        
+
         if log: log.info("Launched Steam Route: %s", exe)
-        print("✅ Steam Route launched successfully")
-        
+        print("✅ SteamRoute launched")
+
     except Exception as e:
         if log: log.error("Failed to launch Steam Route: %s", e)
-        print(f"❌ Failed to launch Steam Route: {e}")
+        print(f"❌ SteamRoute launch failed: {e}")
 
 
 def find_latest_entry(text: str, debug=False) -> Tuple[Optional[float], Optional[int], Optional[int], Optional[str], Optional[str]]:
@@ -514,7 +501,7 @@ def find_latest_entry(text: str, debug=False) -> Tuple[Optional[float], Optional
         # VALIDATION: Skip timestamps that are too old (> 2 hours = 120 min)
         if mins > 120:
             if debug:
-                print(f"   ⚠️  Skipping old timestamp: {hh:02d}:{mm:02d} ({mins:.1f} min ago)")
+                print(f"   skip {hh:02d}:{mm:02d} ({mins:.0f} min, too old)")
             continue
 
         if best_minutes is None or mins < best_minutes:
@@ -527,10 +514,10 @@ def find_latest_entry(text: str, debug=False) -> Tuple[Optional[float], Optional
     
     # Debug output
     if debug and all_matches:
-        print(f"   📋 Found {len(all_matches)} timestamp(s):")
+        print(f"   📋 {len(all_matches)} match(es):")
         for hh, mm, mins, msg in all_matches[:5]:  # Show first 5
             marker = "⭐" if (best_hh == hh and best_mm == mm) else "  "
-            print(f"   {marker} {hh:02d}:{mm:02d} ({mins:.1f} min ago) - {msg}")
+            print(f"   {marker} {hh:02d}:{mm:02d} {mins:.1f}m  {msg}")
 
     return best_minutes, best_hh, best_mm, best_line, best_msg
 
@@ -567,7 +554,7 @@ def trigger_recovery_action(hwnd: int, log, app, reason: str):
         y = cy + int(b["y"])
     else:
         log.error("No button_point or button_point_pct in config. Cannot click.")
-        return
+        return False
 
     # Click
     print(f"   Clicking ({x}, {y})")
@@ -575,8 +562,9 @@ def trigger_recovery_action(hwnd: int, log, app, reason: str):
     pyautogui.click()
 
     time.sleep(settle_click_ms / 1000)
-    print("✅ Recovery complete\n")
-    log.info("Recovery click executed at (%d, %d)", x, y)
+    print("✅ Recovery done\n")
+    log.info("Recovery click at (%d, %d)", x, y)
+    return True
 
 
 def resolve_panel_exe(regions: dict) -> Optional[str]:
@@ -594,12 +582,12 @@ def resolve_panel_exe(regions: dict) -> Optional[str]:
     panel_dir = panel.get("dir")
     
     if not panel_dir:
-        print("❌ panel.dir not configured in regions.yaml")
+        print("❌ panel.dir not set in regions.yaml")
         return None
 
     d = Path(panel_dir)
     if not d.exists():
-        print(f"❌ Panel directory does not exist: {panel_dir}")
+        print(f"❌ Panel dir not found: {panel_dir}")
         return None
 
     # PRIORITY 1: Check for Panel.exe specifically
@@ -607,48 +595,31 @@ def resolve_panel_exe(regions: dict) -> Optional[str]:
     if panel_exe_path.exists():
         print(f"✅ Found Panel.exe")
         return str(panel_exe_path)
-    
+
     # PRIORITY 2: Find any .exe files (for PCs with changing names)
     exes = list(d.glob("*.exe"))
-    
+
     if not exes:
         print(f"❌ No .exe files found in: {panel_dir}")
         return None
 
     # Sort by modification time (newest first)
     exes.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    
+
     newest_exe = str(exes[0])
-    
-    # Show what we found
-    print(f"⚠️  Panel.exe not found, using newest .exe:")
-    print(f"   📁 Found {len(exes)} .exe file(s) in {panel_dir}")
+
+    print(f"⚠️  Panel.exe not found — using newest .exe:")
+    print(f"   {len(exes)} .exe(s) in {panel_dir}:")
     for i, exe in enumerate(exes[:3], 1):  # Show top 3
         mtime = datetime.fromtimestamp(exe.stat().st_mtime)
         marker = "⭐" if i == 1 else "  "
-        print(f"   {marker} {exe.name} (modified: {mtime.strftime('%Y-%m-%d %H:%M:%S')})")
+        print(f"   {marker} {exe.name}  ({mtime.strftime('%Y-%m-%d %H:%M')})")
     if len(exes) > 3:
-        print(f"   ... and {len(exes) - 3} more")
-    
+        print(f"   ...+{len(exes) - 3} more")
+
     print(f"✅ Will launch: {newest_exe}")
     
     return newest_exe
-
-
-def _query_full_process_image_name(pid: int) -> str:
-    """Return full exe path for a PID, or empty string."""
-    import ctypes
-    try:
-        handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
-        if not handle:
-            return ""
-        buf = ctypes.create_unicode_buffer(2048)
-        size = ctypes.c_ulong(len(buf))
-        ok = ctypes.windll.kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size))
-        ctypes.windll.kernel32.CloseHandle(handle)
-        return buf.value if ok else ""
-    except Exception:
-        return ""
 
 
 def find_window_by_process_path(dir_substring: str) -> Tuple[Optional[int], Optional[str]]:
@@ -678,17 +649,17 @@ def find_window_by_process_path(dir_substring: str) -> Tuple[Optional[int], Opti
             pass
     
     win32gui.EnumWindows(enum_handler, None)
-    return matches[0] if matches else (None, None)
+    if not matches:
+        return (None, None)
+    if len(matches) > 1:
+        print(f"   ⚠️  {len(matches)} windows match '{dir_substring}'; using '{matches[0][1]}'")
+    return matches[0]
 
 
 
 
 def restart_explorer(log=None):
     """Restart Windows Explorer when 'Cannot add' is detected"""
-    import subprocess
-    import psutil
-    import win32console
-    
     print("🔄 Restarting Explorer...")
     if log:
         log.warning("Restarting explorer.exe - 'Cannot add' detected")
@@ -736,19 +707,19 @@ def check_cs2_instance_count(hwnd, regions, expected=4, log=None):
     print(f"🎮 CS2: {count}/{expected}")
     
     if count == expected:
-        print(f"   ✅ Correct")
+        print(f"   ✅ OK")
         if log:
             log.info("CS2 count correct: %d", count)
         return True
-    
-    print(f"   ❌ Wrong! Expected {expected}, found {count}")
+
+    print(f"   ❌ Expected {expected}, got {count}")
     if log:
         log.warning("CS2 count wrong: %d (expected %d)", count, expected)
-    
-    print("\n   🔧 Clicking kill_all_cs2...")
+
+    print("   🔧 Clicking kill_all_cs2...")
     kill_button = regions.get("kill_all_cs2_point_pct")
     if not kill_button:
-        print("   ❌ kill_all_cs2_point_pct not in regions.yaml!")
+        print("   ❌ kill_all_cs2_point_pct not configured")
         if log:
             log.error("kill_all_cs2_point_pct not configured")
         return False
@@ -768,11 +739,11 @@ def check_cs2_instance_count(hwnd, regions, expected=4, log=None):
         pyautogui.moveTo(x, y, duration=0.15)
         pyautogui.click()
         print("   ✅ Clicked")
-        
+
         print("   ⏳ Waiting 10s...")
         time.sleep(10)
-        
-        print("   🔄 Re-running first-run...")
+
+        print("   🔄 Re-running first-run")
         run_panel_first_run_if_needed(hwnd, regions, log=log, force=True)
         print("   ✅ Done")
         
@@ -786,26 +757,24 @@ def check_cs2_instance_count(hwnd, regions, expected=4, log=None):
 
 
 def reposition_console_window():
-    """Reposition console to bottom-left corner"""
+    """Reposition console to bottom-left corner, above the taskbar"""
     try:
-        import ctypes
-        import win32console
-        
         console_hwnd = win32console.GetConsoleWindow()
         if not console_hwnd:
             return
-        
-        screen_width = ctypes.windll.user32.GetSystemMetrics(0)
-        screen_height = ctypes.windll.user32.GetSystemMetrics(1)
-        
+
+        # Use work area so the console sits above the taskbar
+        work_area = wintypes.RECT()
+        windll.user32.SystemParametersInfoW(0x30, 0, byref(work_area), 0)
+
         console_width = 800
         console_height = 400
-        
-        x = 0
-        y = screen_height - console_height
-        
-        print(f"📐 Repositioning console to bottom-left ({x}, {y})...")
-        
+
+        x = work_area.left
+        y = work_area.bottom - console_height
+
+        print(f"📐 Console → ({x}, {y})")
+
         win32gui.SetWindowPos(
             console_hwnd,
             win32con.HWND_TOP,
@@ -813,11 +782,11 @@ def reposition_console_window():
             console_width, console_height,
             win32con.SWP_SHOWWINDOW
         )
-        
+
         print("✅ Console repositioned\n")
-        
+
     except Exception as e:
-        print(f"⚠️  Console reposition failed: {e}\n")
+        print(f"⚠️  Console reposition: {e}\n")
 
 def run_watchdog() -> None:
     log = setup_logger()
@@ -839,199 +808,220 @@ def run_watchdog() -> None:
     debounce = int(app["watchdog"].get("action_debounce_seconds", 180))
 
     debug_print_ocr = bool(app["watchdog"].get("debug_print_ocr", False))
-    save_last_log_image = bool(app["watchdog"].get("save_last_log_image", True))
     settle_norm_ms = int(app["watchdog"].get("settle_after_normalize_ms", 150))
-    settle_focus_ms = int(app["watchdog"].get("settle_after_focus_ms", 200))
 
     # Initialize normalize flag based on config
     normalize_every = bool(app["watchdog"].get("normalize_every_loop", True))
 
-    os.makedirs("logs", exist_ok=True)
+    os.makedirs(os.path.join(BASE, "logs"), exist_ok=True)
     hwnd = None
     last_found_title = None
-    last_action_ts = 0.0
+    last_action_ts = time.time()  # Prevents immediate trigger on startup
     last_logged_latest_line = None
     steam_route_launched = False
-    first_run_completed_pids = set()  # Track PIDs we've already run first-run on
+    first_run_completed_pids = []  # Ordered list so we keep the most recent on cleanup
     cs2_check_timestamp = None
     cs2_check_done = False
 
     print("\n" + "="*70)
     print("🐕 APPLICATION WATCHDOG STARTED")
     print("="*70)
-    print(f"Warm timeout: {warm_timeout} min (if msg contains 'warm')")
-    print(f"General timeout: {general_timeout} min (otherwise)")
-    print(f"Poll interval: {poll} sec")
+    print(f"Warm timeout:    {warm_timeout} min")
+    print(f"General timeout: {general_timeout} min")
+    print(f"Poll interval:   {poll} sec")
     print("="*70 + "\n")
     
     log.info("Starting watchdog - Warm: %.1f min, General: %.1f min", warm_timeout, general_timeout)
 
     # OPTIMIZATION: Load regions once at startup (not every loop)
     regions = load_yaml(REGIONS_CFG_PATH)
-    loop_count = 0
-    
+
+    # Tracks consecutive "process running but window absent" cycles to prevent infinite loop
+    _panel_no_window_iters = 0
+
     while True:
-        loop_count += 1
-        
         # Check window
         if hwnd is None or not win32gui.IsWindow(hwnd):
-            print("🔍 Searching for target window...")
+            print("🔍 Searching for window...")
             hwnd, last_found_title = find_hwnd_by_title_substring(title_sub)
-            
+
             if not hwnd:
-                print(f"⚠️  Window not found (looking for: '{title_sub}'). Launching panel.exe...")
-                log.warning("Window not found. Launching panel.exe")
+                print(f"⚠️  Window not found ('{title_sub}')")
+                log.warning("Window not found.")
+
+                # Guard: if panel process is already running but window is just hidden/loading,
+                # don't spawn a second instance — wait and search again.
+                panel_dir_check = regions.get("panel", {}).get("dir", "")
+                if panel_dir_check and is_panel_running(panel_dir_check):
+                    _panel_no_window_iters += 1
+                    if _panel_no_window_iters <= 12:
+                        print(f"⚠️  Panel running but window not found. Waiting 5s... ({_panel_no_window_iters}/12)")
+                        log.warning("Panel running (no window). Waiting 5s. (%d/12)", _panel_no_window_iters)
+                        time.sleep(5)
+                        continue
+                    else:
+                        print(f"⚠️  Panel running without window for ~{_panel_no_window_iters * 5}s — forcing new launch")
+                        log.warning("Forcing new panel launch after %d no-window retries", _panel_no_window_iters)
+                        _panel_no_window_iters = 0
+                        # Fall through to launch
+
+                print("Launching panel...")
+                log.warning("Launching panel")
 
                 try:
                     regions = load_yaml(REGIONS_CFG_PATH)
-                    
+
                     # ENHANCED: Automatically find newest .exe in panel.dir
                     panel_exe = resolve_panel_exe(regions)
 
                     if not panel_exe:
                         log.error("Panel EXE not found in panel.dir")
-                        print("❌ Panel EXE not found. Check regions.yaml -> panel.dir")
+                        print("❌ Panel EXE not found (check regions.yaml → panel.dir)")
                         time.sleep(5)
                         continue
-                    
-                    log.warning("Launching Panel: %s", panel_exe)
+
+                    log.info("Panel: %s", panel_exe)
                     print(f"\n🚀 Launching: {panel_exe}")
-                    # Get the folder containing the .exe
                     exe_dir = os.path.dirname(panel_exe)
-                    
-                    print(f"📂 Working directory: {exe_dir}")
-                    
+                    print(f"   cwd: {exe_dir}")
+
                     # Launch with working directory set
                     process = subprocess.Popen(
                         [panel_exe],
-                        cwd=exe_dir,  # ← THE CRITICAL FIX!
+                        cwd=exe_dir,
                         shell=False
                     )
-                    
-                    print(f"✅ Process PID: {process.pid}")
+
+                    print(f"✅ PID {process.pid}")
 
                     if not steam_route_launched:
                         launch_steam_route_if_configured(regions, log=log)
                         steam_route_launched = True
 
                 except Exception as e:
-                    log.exception("Failed to launch panel.exe: %s", e)
-                    print(f"❌ Exception during panel launch: {e}")
+                    log.exception("Panel launch failed: %s", e)
+                    print(f"❌ Launch failed: {e}")
                     time.sleep(5)
                     continue
                 
                 # ENHANCED: Progressive retry logic
-                print("\n🔄 Waiting for panel window to appear...")
-                print(f"   Looking for window title containing: '{title_sub}'")
-                print("   Using progressive retry strategy: 3s, 5s, 8s, 12s delays")
-                
+                print(f"\n🔄 Waiting for window ('{title_sub}')  3s→5s→8s→12s")
+
                 retry_delays = [3, 5, 8, 12]
                 panel_dir = regions.get("panel", {}).get("dir", "")
-                
+
                 for attempt, delay in enumerate(retry_delays, 1):
-                    print(f"\n   Attempt {attempt}/{len(retry_delays)}: waiting {delay}s...")
+                    print(f"   [{attempt}/{len(retry_delays)}] Waiting {delay}s...")
                     time.sleep(delay)
-                    
+
                     # Primary: Try by title
                     hwnd, last_found_title = find_hwnd_by_title_substring(title_sub)
-                    
+
                     if hwnd:
-                        print(f"   ✅ Found by title: {last_found_title}")
+                        print(f"   ✅ Found by title: '{last_found_title}'")
                         break
-                    
+
                     # Fallback: Try by process path
                     if panel_dir:
-                        print(f"   Title search failed, trying by process path...")
+                        print(f"   Title not found, trying by path...")
                         hwnd, last_found_title = find_window_by_process_path(panel_dir)
                         if hwnd:
-                            print(f"   ✅ Found by process path: {last_found_title}")
+                            print(f"   ✅ Found by path: '{last_found_title}'")
                             break
-                    
+
                     if attempt < len(retry_delays):
-                        print(f"   ⚠️  Window not found yet, will retry...")
-                
+                        print(f"   ⚠️  Not found, retrying...")
+
                 if not hwnd:
-                    print("\n❌ Panel launched but window still not found after all retries.")
-                    print("   Possible reasons:")
-                    print("   1. Panel takes longer than 28 seconds to show window")
-                    print(f"   2. Window title doesn't contain: '{title_sub}'")
-                    print("   3. Panel.exe crashed or failed to start")
-                    print(f"\n   💡 TIP: Check app.yaml -> window.title_substring = '{title_sub}'")
+                    print(f"\n❌ Window not found after all retries.")
+                    print(f"   1. Panel >28s to show  2. Title missing '{title_sub}'  3. Crashed on start")
+                    print(f"   💡 Check: app.yaml → window.title_substring")
                     log.error("Panel window not found after progressive retries")
                     time.sleep(5)
                     continue
                 
-                print(f"\n✅ Window found after launch: {last_found_title} (hwnd={hwnd})")
+                _panel_no_window_iters = 0
+                print(f"\n✅ Window: '{last_found_title}' (hwnd={hwnd})")
                 log.info("Window found after launch: hwnd=%s title=%r", hwnd, last_found_title)
 
-                print("\n🔧 Running first-run setup if needed...")
+                print("🔧 First-run check...")
                 
                 # ANTI-SPAM: Check if we've already run first-run on this panel instance
+                _first_run_failed = False
                 try:
                     _, pid = win32process.GetWindowThreadProcessId(hwnd)
                     
                     if pid in first_run_completed_pids:
-                        print(f"✅ First-run already completed for this panel instance (PID: {pid})")
-                        log.info("First-run already completed for PID %d", pid)
+                        print(f"✅ First-run done for PID {pid}")
+                        log.info("First-run done (PID %d)", pid)
                     else:
                         # Run first-run with retry logic (3 attempts)
                         success = False
                         max_attempts = 3
                         
                         for attempt in range(1, max_attempts + 1):
-                            print(f"\n🔄 Attempt {attempt}/{max_attempts}")
+                            print(f"\n🔄 First-run attempt {attempt}/{max_attempts}")
                             log.info("First-run attempt %d/%d for PID %d", attempt, max_attempts, pid)
                             
                             success = run_panel_first_run_if_needed(hwnd, regions, log=log, force=True)
                             
                             if success:
-                                first_run_completed_pids.add(pid)
+                                first_run_completed_pids.append(pid)
                                 
-                                # Set CS2 check for 5 min from now
-                                if cs2_check_timestamp is None:
-                                    cs2_check_timestamp = time.time() + (5 * 60)
-                                    print(f"⏰ CS2 check in 5 min")
-                                    if log:
-                                        log.info("CS2 check scheduled for 5 min")
-                                
-                                print(f"✅ Completed (attempt {attempt})")
-                                log.info("First-run completed for PID %d", pid)
+                                # Schedule CS2 check 5 min from now (reset on each relaunch)
+                                cs2_check_timestamp = time.time() + (5 * 60)
+                                cs2_check_done = False
+                                print(f"⏰ CS2 check in 5 min")
+                                if log:
+                                    log.info("CS2 check scheduled for 5 min")
+
+                                print(f"✅ First-run ok (attempt {attempt})")
+                                log.info("First-run ok (PID %d)", pid)
                                 break
                             else:
-                                print(f"⚠️ Attempt {attempt} failed")
+                                print(f"⚠️  Attempt {attempt} failed")
                                 log.warning("Attempt %d failed for PID %d", attempt, pid)
-                                
+
                                 if attempt < max_attempts:
-                                    print(f"   ⏳ Retry in 5s")
+                                    print(f"   ⏳ Retrying in 5s...")
                                     time.sleep(5)
                                 else:
                                     print(f"❌ All {max_attempts} attempts failed!")
                                     log.error("All attempts failed for PID %d", pid)
-                        
+                                    _first_run_failed = True
+
                 except Exception as e:
                     log.warning("Could not get PID for first-run tracking: %s", e)
                     # Fall back to running it anyway
                     run_panel_first_run_if_needed(hwnd, regions, log=log, force=True)
-                
+
+                if _first_run_failed:
+                    print("⚠️  First-run failed — will retry next loop")
+                    log.warning("First-run failed all attempts; invalidating hwnd to force re-check")
+                    hwnd = None
+                    time.sleep(5)
+                    continue
+
                 # Normalize window position AFTER first-run (always runs)
-                print("\n📐 Normalizing panel window position...")
+                print("📐 Normalizing window...")
                 x, y, moved = normalize_window_bottom_right(
-                    hwnd, 
-                    width=width, 
+                    hwnd,
+                    width=width,
                     height=height,
-                    margin_right=margin_right, 
+                    margin_right=margin_right,
                     margin_bottom=margin_bottom,
                 )
                 if moved:
-                    print(f"   ✅ Window moved to bottom-right: ({x}, {y})")
-                    log.info("Normalized window after first launch -> %d, %d", x, y)
+                    print(f"   ✅ Moved to ({x}, {y})")
+                    log.info("Window normalized -> %d, %d", x, y)
                 else:
-                    print(f"   ℹ️  Window already at correct position: ({x}, {y})")
+                    print(f"   ℹ️  Already at ({x}, {y})")
                 
                 time.sleep(settle_norm_ms / 1000)
 
             else:
-                print(f"✅ Window found: {last_found_title} (hwnd={hwnd})\n")
+                _panel_no_window_iters = 0
+                print(f"✅ Window: '{last_found_title}' (hwnd={hwnd})\n")
                 log.info("Found window: hwnd=%s title=%r", hwnd, last_found_title)
 
         # Normalize window (if allowed)
@@ -1068,8 +1058,8 @@ def run_watchdog() -> None:
                 if not log_region:
                     raise RuntimeError("Missing log_region in config.")
 
-            # NEW: Scroll to bottom before capturing (if configured)
-            scroll_logbox_to_top(hwnd, regions, verbose=True)  # Always show output
+            # Scroll to top before capturing (if log_scroll_point_pct is configured)
+            scroll_logbox_to_top(hwnd, regions, verbose=False)
 
             img = capture_logbox_client(hwnd, log_region)
             
@@ -1088,15 +1078,14 @@ def run_watchdog() -> None:
                 print(f"📄 OCR: {text[:100]}...")
 
         except Exception as e:
-            print(f"❌ ERROR: {e}\n")
+            print(f"❌ Capture error: {e}\n")
             log.exception("Capture failed")
             time.sleep(poll)
             continue
 
-                # Logic Analysis
         # Logic Analysis (1st pass)
-        minutes_ago, hh, mm, latest_line, latest_msg = find_latest_entry(text, debug=True)  # Always debug
-        
+        minutes_ago, hh, mm, latest_line, latest_msg = find_latest_entry(text, debug=True)
+
 
         # Check for "Cannot add" error (restart explorer)
         if latest_msg and "cannot add" in latest_msg.lower():
@@ -1106,13 +1095,9 @@ def run_watchdog() -> None:
         if minutes_ago is None:
             # Retry once using screen-capture fallback (still inside the same loop)
             try:
-                print("⚠️  Parse failed. Retrying with screen-capture fallback...")
-        
-                # normalize common OCR pipe variants BEFORE parsing
-                def _norm(s: str) -> str:
-                    return (s or "").replace("｜", "|").replace("¦", "|").replace("丨", "|")
-        
-                # screen capture of the same client region
+                print("⚠️  Parse failed — trying screen fallback...")
+
+                # Screen capture of the same client region
                 cx, cy = client_origin_screen(hwnd)
                 left = cx + int(log_region["x"])
                 top  = cy + int(log_region["y"])
@@ -1129,18 +1114,19 @@ def run_watchdog() -> None:
                 if debug_print_ocr:
                     print(f"💾 Saved: {os.path.join(logs_dir, 'last_log_fallback.png')}")
         
-                text2 = _norm((ocr_log_text(img2) or "").strip())
+                # normalize_text_for_parsing handles all pipe variants + colon/I/l fixes
+                text2 = normalize_text_for_parsing((ocr_log_text(img2) or "").strip())
         
                 if debug_print_ocr:
                     print(f"📄 OCR(fallback): {text2[:100]}...")
         
-                minutes_ago, hh, mm, latest_line, latest_msg = find_latest_entry(text2, debug=True)  # Always debug
+                minutes_ago, hh, mm, latest_line, latest_msg = find_latest_entry(text2, debug=True)
         
             except Exception as e:
                 log.warning("Fallback capture/OCR failed: %s", e)
         
         if minutes_ago is None:
-            print("⚠️  No readable 'HH:MM | msg' found.\n")
+            print("⚠️  No parseable entry found.\n")
             log.info("No parseable entry.")
             time.sleep(poll)
             continue
@@ -1175,12 +1161,6 @@ def run_watchdog() -> None:
                 f"{logic_type} timeout exceeded "
                 f"({minutes_ago:.1f} >= {effective_threshold} min). Msg: '{latest_msg}'"
             )
-        if not should_trigger and minutes_ago >= general_timeout:
-             should_trigger = True
-             trigger_reason = (
-                 f"Safety Net (General) timeout exceeded "
-                 f"({minutes_ago:.1f} >= {general_timeout} min)."
-             )
 
         if should_trigger:
             if since_last < debounce:
@@ -1189,10 +1169,12 @@ def run_watchdog() -> None:
                 log.warning("Cooldown active. Reason: %s", trigger_reason)
             else:
                 # Disable normalization for next loop to prevent jumping during recovery
-                normalize_every = False 
-                
-                trigger_recovery_action(hwnd, log, app, trigger_reason)
-                last_action_ts = now_ts
+                normalize_every = False
+
+                if trigger_recovery_action(hwnd, log, app, trigger_reason):
+                    last_action_ts = now_ts
+                else:
+                    log.warning("Recovery action failed; cooldown not applied")
         else:
             # Re-enable normalization if we are healthy (and config says so)
             normalize_every = bool(app["watchdog"].get("normalize_every_loop", True))
@@ -1206,25 +1188,20 @@ def run_watchdog() -> None:
                 log.warning("SteamRoute crashed, relaunching")
                 launch_steam_route_if_configured(regions, log=log)
         
-        # PRODUCTION: Cleanup PID tracking to prevent memory growth
+        # Cleanup PID tracking to prevent memory growth (keep 10 most recent)
         if len(first_run_completed_pids) > 20:
-            print("🧹 Cleaning up old PID tracking...")
-            # Keep only recent PIDs (last 10)
-            if len(first_run_completed_pids) > 10:
-                first_run_completed_pids = set(list(first_run_completed_pids)[-10:])
+            first_run_completed_pids = first_run_completed_pids[-10:]
         
 
         # Check CS2 count (5 min after first-run)
         if cs2_check_timestamp is not None and not cs2_check_done:
             if time.time() >= cs2_check_timestamp:
-                print("\n" + "=" * 70)
-                print("🎮 CS2 INSTANCE CHECK")
-                print("=" * 70)
-                
-                check_cs2_instance_count(hwnd, regions, expected=4, log=log)
-                
-                cs2_check_done = True
-                print("=" * 70 + "\n")
+                print("\n🎮 CS2 INSTANCE CHECK")
+                try:
+                    check_cs2_instance_count(hwnd, regions, expected=4, log=log)
+                finally:
+                    cs2_check_done = True
+                print("")
         
         time.sleep(poll)
 
