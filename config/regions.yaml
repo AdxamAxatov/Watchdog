@@ -57,6 +57,6 @@ rdp_windows:
   # Size for each RDP game window (SixFarmers15, SixFarmers16)
   width: 1616   # Width in pixels
   height: 939  # Height in pixels
-  
   # Window search term
   title_search: "SinFermera"
+  focus_interval_minutes: 15

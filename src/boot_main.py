@@ -7,6 +7,7 @@ from datetime import datetime
 
 from steps.memreduct import run as mem_run
 from steps.rdp import run as rdp_run
+from steps.windows_focuser import run as focus_run  
 from utils import load_yaml, exe_dir
 
 
@@ -46,7 +47,9 @@ def main():
     # Step 1: MemReduct
     try:
         log.info("Step 1: MemReduct")
+        print("1️⃣  Starting MemReduct...")
         mem_run({"exe_path": paths["memreduct_exe"][0]})
+        print("   ✅ MemReduct complete\n")
         log.info("MemReduct done")
     except Exception:
         log.exception("MemReduct step failed")
@@ -66,6 +69,16 @@ def main():
         raise
 
     log.info("=== BOOT COMPLETE ===")
+    
+    # NEW: Step 3: Focus Maintenance (runs continuously)
+    try:
+        log.info("Step 3: Focus Maintenance")
+        print("3️⃣  Starting Focus Maintenance...\n")
+        focus_run()  # This runs indefinitely
+        log.info("Focus Maintenance ended")
+    except Exception:
+        log.exception("Focus Maintenance step failed")
+        raise
 
 
 if __name__ == "__main__":
