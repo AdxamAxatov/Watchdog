@@ -25,6 +25,7 @@ from ocr import ocr_log_text
 from utils import load_yaml, setup_logger
 from window_connector import find_hwnd_by_title_substring
 from layout import normalize_window_bottom_right
+from auto_updater import check_updates, get_status
 from pathlib import Path
 
 
@@ -819,8 +820,44 @@ def reposition_console_window():
     except Exception as e:
         print(f"⚠️  Console reposition failed: {e}\n")
 
+def show_update_status():
+    """Display update status (can be triggered by hotkey or command)"""
+    status = get_status()
+    
+    print("\n╔════════════════════════════════════════╗")
+    print("║        AUTO-UPDATE STATUS              ║")
+    print("╠════════════════════════════════════════╣")
+    print(f"║ Enabled:     {str(status.get('enabled', False)):20} ║")
+    print(f"║ Version:      {status.get('current_version', 'unknown'):20} ║")
+    print(f"║ Pending:      {str(status.get('update_pending', False)):20} ║")
+    print(f"║ Next Check:   {status.get('next_check', 'N/A') or 'N/A':20} ║")
+    print("╚════════════════════════════════════════╝")
+    
+    if status.get('update_ready'):
+        print("\n⚠️  UPDATE READY: Restart to apply new version")
+
 def run_watchdog() -> None:
     log = setup_logger()
+
+        # === AUTO-UPDATE CHECK (at startup) ===
+    try:
+        update_result = check_updates()
+        
+        if update_result:
+            if update_result.get('ready_to_apply'):
+                log.info("╔════════════════════════════════════════╗")
+                log.info("║  🔄 UPDATE READY                       ║")
+                log.info(f"║  New version: {update_result.get('latest_version'):20} ║")
+                log.info("║  Restart to apply update               ║")
+                log.info("╚════════════════════════════════════════╝")
+                print("\n" + "="*70)
+                print("🔄 UPDATE READY - Restart watchdog.exe to apply")
+                print("="*70 + "\n")
+            elif update_result.get('update_available'):
+                log.info("⏳ Update found, downloading...")
+                print("⏳ Downloading update...")
+    except Exception as e:
+        log.debug(f"Update check skipped: {e}")
     
     # Reposition console BEFORE launching anything
     reposition_console_window()
@@ -1224,7 +1261,7 @@ def run_watchdog() -> None:
                 check_cs2_instance_count(hwnd, regions, expected=4, log=log)
                 
                 cs2_check_done = True
-                print("=" * 70 + "\n")
+                print("=" * 70 + "\n")  
         
         time.sleep(poll)
 

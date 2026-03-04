@@ -1,0 +1,17 @@
+# config/update_config.yaml
+# FLAT STRUCTURE - no 'auto_update:' wrapper needed
+
+enabled: true
+repo_owner: "AdxamAxatov"
+repo_name: "Watchdog"
+current_version: "1.0.0"
+executable_name: "Watchdog.exe"
+check_interval_hours: 1
+auto_restart: false
+restart_window:
+  start_hour: 3
+  end_hour: 5
+silent_mode: true
+backup_old_version: true
+github_api_timeout: 10
+download_timeout: 60
