@@ -813,6 +813,8 @@ def run_watchdog() -> None:
     first_run_completed_pids = set()  # Track PIDs we've already run first-run on
     cs2_check_timestamp = None
     cs2_check_done = False
+    last_explorer_restart_ts = time.time()  # Periodic explorer restart every 30 min
+    last_update_check_ts = 0.0  # Force check on first loop, then every 1 hour
 
     print("\n" + "="*70)
     print("🐕 APPLICATION WATCHDOG STARTED")
@@ -830,17 +832,19 @@ def run_watchdog() -> None:
     while True:
         loop_count += 1
 
-        # === PERIODIC AUTO-UPDATE CHECK (every ~1 hour, throttled by interval guard) ===
-        try:
-            log.info("Auto-update: checking...")
-            update_result = check_updates()
-            log.info(f"Auto-update result: {update_result}")
-            if update_result and update_result.get('error'):
-                error_msg = update_result['error']
-                if 'Interval' not in error_msg and 'Disabled' not in error_msg:
-                    log.warning(f"Auto-update failed: {error_msg}")
-        except Exception as e:
-            log.warning(f"Auto-update exception: {e}")
+        # === PERIODIC AUTO-UPDATE CHECK (every 1 hour) ===
+        if time.time() - last_update_check_ts >= 3600:
+            try:
+                log.info("Auto-update: checking...")
+                update_result = check_updates()
+                log.info(f"Auto-update result: {update_result}")
+                if update_result and update_result.get('error'):
+                    error_msg = update_result['error']
+                    if 'Interval' not in error_msg and 'Disabled' not in error_msg and 'Dev mode' not in error_msg:
+                        log.warning(f"Auto-update failed: {error_msg}")
+            except Exception as e:
+                log.warning(f"Auto-update exception: {e}")
+            last_update_check_ts = time.time()
 
         # Check window
         if hwnd is None or not win32gui.IsWindow(hwnd):
@@ -1182,6 +1186,13 @@ def run_watchdog() -> None:
             if len(first_run_completed_pids) > 10:
                 first_run_completed_pids = set(list(first_run_completed_pids)[-10:])
         
+
+        # Periodic explorer restart every 30 minutes
+        if time.time() - last_explorer_restart_ts >= 30 * 60:
+            print("\n🔄 Periodic explorer restart (30 min interval)...")
+            log.info("Periodic explorer restart triggered")
+            restart_explorer(log=log)
+            last_explorer_restart_ts = time.time()
 
         # Check CS2 count (5 min after first-run)
         if cs2_check_timestamp is not None and not cs2_check_done:

@@ -1,16 +1,6 @@
 """
 Auto-updater for Watchdog executables from GitHub Releases
 Reads configuration from external YAML file (no rebuild required)
-
-FIXED VERSION - All 8 issues resolved:
-1. ✅ Actually executes update script
-2. ✅ Proper process wait with retry
-3. ✅ Rollback on failure
-4. ✅ GitHub rate limiting handling
-5. ✅ Correct default config
-6. ✅ SHA256 checksum verification
-7. ✅ Visible error notifications
-8. ✅ Temp file cleanup
 """
 
 import os
@@ -46,18 +36,15 @@ class GitHubAutoUpdater:
     # FIXED Issue #5: Correct defaults matching your repo
     DEFAULT_CONFIG = {
         'enabled': False,
-        'repo_owner': 'AdxamAxatov',        # ✅ Fixed from 's1gmamale1'
-        'repo_name': 'Watchdog',             # ✅ Fixed from 'watchdog'
+        'repo_owner': 'AdxamAxatov',
+        'repo_name': 'Watchdog',
         'current_version': '1.0.0',
-        'executable_name': 'Watchdog.exe',   # ✅ Fixed from 'watchdog.exe'
+        'executable_name': 'Watchdog.exe',
         'check_interval_hours': 1,
-        'auto_restart': False,
-        'restart_window': {'start_hour': 3, 'end_hour': 5},
         'silent_mode': True,
-        'backup_old_version': True,
         'github_api_timeout': 10,
         'download_timeout': 60,
-        'github_token': None  # NEW: Optional token for rate limit (5000/hr instead of 60/hr)
+        'github_token': None,
     }
     
     def __init__(self, config_path: Optional[str] = None):
@@ -156,10 +143,8 @@ class GitHubAutoUpdater:
         self.current_version = self.config['current_version']
         self.executable_name = self.config['executable_name']
         self.check_interval_hours = self.config['check_interval_hours']
-        self.auto_restart = self.config['auto_restart']
-        self.restart_window = self.config.get('restart_window', {})
         self.silent_mode = self.config.get('silent_mode', True)
-        self.github_token = self.config.get('github_token')  # NEW: Optional token
+        self.github_token = self.config.get('github_token')
         self.api_url = f"https://api.github.com/repos/{self.repo_owner}/{self.repo_name}/releases/latest"
     
     def _setup_paths(self):
@@ -190,14 +175,6 @@ class GitHubAutoUpdater:
                     pass
         except Exception as e:
             logger.debug(f"Cleanup error: {e}")
-    
-    def _is_in_restart_window(self) -> bool:
-        if not self.restart_window:
-            return False
-        current_hour = time.localtime().tm_hour
-        start = self.restart_window.get('start_hour', 3)
-        end = self.restart_window.get('end_hour', 5)
-        return start <= current_hour < end
     
     def get_latest_release(self) -> Optional[Dict[str, Any]]:
         """FIXED Issue #4: Added GitHub token support and rate limit handling"""
@@ -353,202 +330,140 @@ class GitHubAutoUpdater:
         
         return True
     
-    def test_executable(self, exe_path: Path) -> bool:
-        """FIXED Issue #3: Test new executable before applying"""
-        try:
-            # Try to run with --version flag
-            result = subprocess.run(
-                [str(exe_path), "--version"],
-                timeout=5,
-                capture_output=True,
-                text=True
-            )
-            # Don't require specific return code, just that it runs
-            logger.debug(f"Exe test completed (code: {result.returncode})")
-            return True
-        except subprocess.TimeoutExpired:
-            logger.error("New exe test timed out")
-            return False
-        except Exception as e:
-            logger.error(f"New exe test failed: {e}")
-            return False
-    
     def apply_update(self, new_executable: Path, new_version: str) -> bool:
-        """FIXED Issues #1, #2, #3, #9: Execute script, wait for process, rollback on failure, update config version"""
-        try:
-            if getattr(sys, 'frozen', False):
-                current_exe = Path(sys.executable)
-            else:
-                current_exe = self.app_dir / self.executable_name
-                if not current_exe.exists():
-                    logger.warning(f"Running as script, exe not found at {current_exe} — update script will be created anyway")
+        """Download verified. Replace exe via batch script and restart.
 
-            
-            # FIXED Issue #3: Verify new exe before applying
-            if not self.verify_download(new_executable):
-                logger.error("New executable failed verification")
-                return False
-            
-            # FIXED Issue #3: Test new executable
-            # logger.info("Testing new executable...")
-            # if not self.test_executable(new_executable):
-            #     logger.error("New executable failed test run")
-            #     return False
-            
+        Multi-user safe: uses a lock file next to the exe so only one
+        instance across all user sessions performs the replacement.  The
+        batch script kills ALL Watchdog.exe processes (not just ours)
+        before moving files, so the exe is never locked.
+        """
+        if not getattr(sys, 'frozen', False):
+            logger.info(f"Dev mode (.py): update v{new_version} available but skipping apply")
+            return False
+
+        try:
+            current_exe = Path(sys.executable)
+            exe_dir = current_exe.parent
             backup_exe = current_exe.with_suffix('.exe.backup')
-            update_script = self.temp_dir / "apply_update.bat"
-            
-            # FIXED Issue #9: Find config file to update version
-            if getattr(sys, 'frozen', False):
-                exe_dir = Path(sys.executable).parent
-            else:
-                exe_dir = Path(__file__).parent.parent
-            
-            config_paths = [
-                exe_dir / "config" / "update_config.yaml",
-                exe_dir / "update_config.yaml",
-            ]
-            
-            config_file = None
-            for path in config_paths:
-                if path.exists():
-                    config_file = path
+            lock_file = exe_dir / ".update_lock"
+
+            # ── Multi-instance guard ──────────────────────────────
+            # The lock file sits next to the exe (shared by all users).
+            # First instance to create it wins; others bail out.
+            if lock_file.exists():
+                try:
+                    lock_age = time.time() - lock_file.stat().st_mtime
+                    if lock_age < 300:          # < 5 min  → another instance is handling it
+                        logger.info("Another instance is already applying the update, skipping")
+                        return False
+                    # Stale lock (> 5 min) → previous attempt crashed, take over
+                    logger.warning("Stale update lock detected (%.0fs old), taking over", lock_age)
+                except OSError:
+                    pass
+
+            lock_file.write_text(str(os.getpid()), encoding='utf-8')
+
+            # ── Update config version ─────────────────────────────
+            for cfg_path in [exe_dir / "config" / "update_config.yaml", exe_dir / "update_config.yaml"]:
+                if cfg_path.exists():
+                    try:
+                        content = cfg_path.read_text(encoding='utf-8')
+                        content = re.sub(
+                            r'current_version:\s*"[^"]*"',
+                            f'current_version: "{new_version}"',
+                            content
+                        )
+                        cfg_path.write_text(content, encoding='utf-8')
+                        logger.info(f"Config version updated to {new_version}")
+                    except Exception as e:
+                        logger.warning(f"Could not update config version: {e}")
                     break
 
-            # Update current_version in config so the new exe won't re-update immediately
-            if config_file:
-                try:
-                    content = config_file.read_text(encoding='utf-8')
-                    import re as _re
-                    content = _re.sub(
-                        r'current_version:\s*"[^"]*"',
-                        f'current_version: "{new_version}"',
-                        content
-                    )
-                    config_file.write_text(content, encoding='utf-8')
-                    logger.info(f"Config version updated to {new_version}")
-                except Exception as e:
-                    logger.warning(f"Could not update config version: {e}")
+            # ── Build batch script ────────────────────────────────
+            update_script = self.temp_dir / "apply_update.bat"
+            exe_name = current_exe.name          # e.g. "Watchdog.exe"
 
-            # FIXED Issue #2: Proper process wait with retry
-            # FIXED Issue #3: Rollback on failure
-            # FIXED Issue #9: Auto-update config version
-            script = f"""@echo off
-setlocal enabledelayedexpansion
+            cur = str(current_exe).replace('%', '%%')
+            new = str(new_executable).replace('%', '%%')
+            bak = str(backup_exe).replace('%', '%%')
+            lck = str(lock_file).replace('%', '%%')
 
+            bat = f"""@echo off
+title Watchdog Auto-Updater
 echo ========================================
-echo  Watchdog Auto-Updater
+echo   Watchdog Auto-Updater
 echo ========================================
 echo.
 
-echo [1/6] Waiting for Watchdog to exit...
+echo [1/5] Stopping ALL {exe_name} instances...
+taskkill /F /IM "{exe_name}" >NUL 2>&1
 
-REM Wait up to 30 seconds for process to exit
-set /a count=0
-:wait_loop
-tasklist /FI "IMAGENAME eq {current_exe.name}" 2>NUL | find /I /N "{current_exe.name}">NUL
-if "%ERRORLEVEL%"=="0" (
-    timeout /t 1 /nobreak > nul
-    set /a count+=1
-    if !count! LSS 30 goto wait_loop
+echo   Waiting for processes to release file lock...
+:wait
+tasklist /FI "IMAGENAME eq {exe_name}" 2>NUL | find /I "{exe_name}" >NUL
+if %ERRORLEVEL%==0 (
+    timeout /t 1 /nobreak >NUL
+    goto wait
 )
+echo   All instances stopped.
 
-REM Force kill if still running
-tasklist /FI "IMAGENAME eq {current_exe.name}" 2>NUL | find /I /N "{current_exe.name}">NUL
-if "%ERRORLEVEL%"=="0" (
-    echo [2/5] Force stopping process...
-    taskkill /F /IM {current_exe.name} 2>nul
-    timeout /t 2 /nobreak > nul
-)
-
-cd /d "{self.app_dir}"
-
-REM Backup old version
-echo [3/5] Backing up current version...
-if exist "{backup_exe}" del /Q "{backup_exe}" 2>nul
-ren "{current_exe.name}" "{backup_exe.name}"
+echo [2/5] Backing up current version...
+if exist "{bak}" del /Q "{bak}"
+move /Y "{cur}" "{bak}"
 if %ERRORLEVEL% NEQ 0 (
-    echo.
-    echo ERROR: Failed to backup current version!
-    echo File may be in use by another process.
-    echo.
-    pause
-    exit /b 1
+    echo   Exe still locked, retrying in 3s...
+    timeout /t 3 /nobreak >NUL
+    move /Y "{cur}" "{bak}"
+    if %ERRORLEVEL% NEQ 0 (
+        echo FATAL: Backup failed. Aborting.
+        del /Q "{lck}" 2>NUL
+        pause
+        exit /b 1
+    )
 )
 
-REM Move new version
-echo [4/5] Installing new version...
-move /Y "{new_executable}" "{current_exe}"
+echo [3/5] Installing new version...
+move /Y "{new}" "{cur}"
 if %ERRORLEVEL% NEQ 0 (
-    echo.
-    echo ERROR: Failed to install new version!
-    echo Rolling back to previous version...
-    ren "{backup_exe.name}" "{current_exe.name}"
-    echo.
-    echo Rollback complete. Update aborted.
+    echo ERROR: Install failed! Rolling back...
+    move /Y "{bak}" "{cur}"
+    del /Q "{lck}" 2>NUL
     pause
     exit /b 1
 )
 
-REM Verify new file exists
-if not exist "{current_exe}" (
-    echo.
-    echo ERROR: New version not found after move!
-    echo Rolling back...
-    ren "{backup_exe.name}" "{current_exe.name}"
-    echo.
-    pause
-    exit /b 1
-)
+echo [4/5] Starting updated Watchdog...
+start "" "{cur}"
 
-echo [5/5] Starting updated version...
-timeout /t 2 /nobreak > nul
-start "" "{current_exe}"
+echo [5/5] Cleanup...
+del /Q "{lck}" 2>NUL
 
-if %ERRORLEVEL% EQU 0 (
-    echo.
-    echo ========================================
-    echo  Update completed successfully!
-    echo ========================================
-    timeout /t 3 /nobreak > nul
-) else (
-    echo.
-    echo WARNING: Failed to start new version!
-    echo You may need to start manually.
-    pause
-)
-
-REM Cleanup
-del "{update_script}" 2>nul
+echo.
+echo ========================================
+echo   Update complete!
+echo ========================================
+timeout /t 3 /nobreak >NUL
+del "%~f0"
 exit
 """
-            
-            with open(update_script, 'w', encoding='utf-8') as f:
-                f.write(script)
-            
-            logger.info("Update script created")
-            
-            # FIXED Issue #1: ACTUALLY EXECUTE THE SCRIPT!
-            logger.info("Executing update script...")
-            
-            # Start the batch script in a new console window
-            creationflags = subprocess.CREATE_NEW_CONSOLE if sys.platform == 'win32' else 0
-            subprocess.Popen(
-                [str(update_script)],
-                shell=True,
-                creationflags=creationflags,
-                cwd=str(self.app_dir)
+            update_script.write_text(bat, encoding='utf-8')
+            logger.info("Launching updater batch script...")
+
+            proc = subprocess.Popen(
+                ["cmd.exe", "/C", str(update_script)],
+                creationflags=subprocess.CREATE_NEW_CONSOLE | subprocess.CREATE_NEW_PROCESS_GROUP,
             )
-            
-            logger.info("Update script started - exiting current process in 2 seconds...")
-            
-            # Give user time to see the message
-            time.sleep(2)
-            
-            # FIXED Issue #1: Exit so batch script can replace exe
-            logger.info("Exiting for update...")
+
+            if proc.poll() is not None:
+                logger.error("Updater process failed to start")
+                lock_file.unlink(missing_ok=True)
+                return False
+
+            logger.info(f"Updater running (PID {proc.pid}), exiting now...")
+            time.sleep(1)
             sys.exit(0)
-            
+
         except Exception as e:
             logger.error(f"Failed to apply update: {e}")
             return False
@@ -562,8 +477,7 @@ exit
             'latest_version': None,
             'downloaded': False,
             'ready_to_apply': False,
-            'auto_restarted': False,
-            'error': None
+            'error': None,
         }
         
         if not self.enabled:
@@ -622,12 +536,15 @@ exit
             return result
         
         result['downloaded'] = True
-        
+
         if self.apply_update(download_path, latest):
             result['ready_to_apply'] = True
             # Note: apply_update() calls sys.exit(0) if successful
         else:
-            result['error'] = 'Failed to apply update'
+            if not getattr(sys, 'frozen', False):
+                result['error'] = 'Dev mode: skipped apply (no exe to replace)'
+            else:
+                result['error'] = 'Failed to apply update'
         
         return result
     
@@ -638,9 +555,7 @@ exit
             'update_pending': self.update_marker.exists(),
             'update_ready': False,
             'next_check': None,
-            'auto_restart': self.auto_restart if self.enabled else False,
-            'in_restart_window': self._is_in_restart_window() if self.enabled else False,
-            'has_github_token': bool(self.github_token) if self.enabled else False
+            'has_github_token': bool(self.github_token) if self.enabled else False,
         }
         
         if status['update_pending']:
