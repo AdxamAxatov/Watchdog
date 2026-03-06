@@ -11,3 +11,4 @@ WatchdogDeploy/
 third_party/
 pyinstxtractor/
 CLAUDE.md
+config/update_config.yaml
