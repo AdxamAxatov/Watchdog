@@ -28,10 +28,10 @@ panel:
       - { x_pct: 0.5655, y_pct: 0.6631, wait_s: 2.0 }  # Click 2
       - { x_pct: 0.8238, y_pct: 0.7825, wait_s: 2.0 }  # Click 3
 
-steam_route:
-  exe: "C:/Users/SinFermera/Desktop/SteamRouteTool/SteamRouteTool.exe"
-  process_name: "SteamRouteTool.exe"  # This is critical for duplicate detection!
-  launch_with_panel: true
+# steam_route:
+#   exe: "C:/Users/SinFermera/Desktop/SteamRouteTool/SteamRouteTool.exe"
+#   process_name: "SteamRouteTool.exe"  # This is critical for duplicate detection!
+#   launch_with_panel: true
 
 paths:
   # expressvpn_exe:

@@ -13,7 +13,8 @@ def normalize_window_bottom_right(hwnd: int, width: int, height: int, margin_rig
 
     wa_left, wa_top, wa_right, wa_bottom = get_workarea_rect()
 
-    # bottom-right position inside work area
+    left, top, right, bottom = win32gui.GetWindowRect(hwnd)
+
     x = (wa_right - width) - margin_right
     y = (wa_bottom - height) - margin_bottom
 
@@ -21,5 +22,4 @@ def normalize_window_bottom_right(hwnd: int, width: int, height: int, margin_rig
         win32gui.MoveWindow(hwnd, x, y, width, height, True)
         return x, y, True
     except pywintypes.error:
-        left, top, right, bottom = win32gui.GetWindowRect(hwnd)
         return left, top, False

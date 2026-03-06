@@ -6,7 +6,6 @@ import os
 import re
 from datetime import datetime, timedelta
 from typing import Optional, Tuple
-
 import win32gui
 import win32con
 import pyautogui
@@ -15,12 +14,12 @@ import cv2
 import subprocess
 import psutil
 import win32console
+import ctypes
 import csv
 import io
 import win32process
 import win32ui
 from ctypes import windll
-
 from ocr import ocr_log_text
 from utils import load_yaml, setup_logger
 from window_connector import find_hwnd_by_title_substring
@@ -403,38 +402,6 @@ def is_process_running(image_name: str) -> bool:
     except Exception:
         return False
 
-def is_panel_running(panel_dir: str) -> bool:
-    """
-    Check if ANY .exe from the panel directory is currently running.
-    This prevents relaunching when the panel is already open.
-    """
-    if not panel_dir:
-        return False
-    
-    try:
-        d = Path(panel_dir)
-        if not d.exists():
-            return False
-        
-        # Get all .exe filenames in the directory
-        exes = [exe.name for exe in d.glob("*.exe")]
-        
-        if not exes:
-            return False
-        
-        # Check if any of them are running
-        for exe_name in exes:
-            if is_process_running(exe_name):
-                print(f"   ✅ Panel process already running: {exe_name}")
-                return True
-        
-        return False
-        
-    except Exception as e:
-        print(f"   ⚠️  Error checking panel process: {e}")
-        return False
-
-
 def launch_steam_route_if_configured(regions, log=None):
     """Launch Steam Route if configured and not already running."""
     cfg = (regions or {}).get("steam_route") or {}
@@ -638,7 +605,6 @@ def resolve_panel_exe(regions: dict) -> Optional[str]:
 
 def _query_full_process_image_name(pid: int) -> str:
     """Return full exe path for a PID, or empty string."""
-    import ctypes
     try:
         handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
         if not handle:
@@ -681,14 +647,8 @@ def find_window_by_process_path(dir_substring: str) -> Tuple[Optional[int], Opti
     win32gui.EnumWindows(enum_handler, None)
     return matches[0] if matches else (None, None)
 
-
-
-
 def restart_explorer(log=None):
     """Restart Windows Explorer when 'Cannot add' is detected"""
-    import subprocess
-    import psutil
-    import win32console
     
     print("🔄 Restarting Explorer...")
     if log:
@@ -789,21 +749,18 @@ def check_cs2_instance_count(hwnd, regions, expected=4, log=None):
 def reposition_console_window():
     """Reposition console to bottom-left corner"""
     try:
-        import ctypes
-        import win32console
-        
         console_hwnd = win32console.GetConsoleWindow()
         if not console_hwnd:
             return
         
-        screen_width = ctypes.windll.user32.GetSystemMetrics(0)
-        screen_height = ctypes.windll.user32.GetSystemMetrics(1)
+        work_area = ctypes.wintypes.RECT()
+        ctypes.windll.user32.SystemParametersInfoW(0x30, 0, ctypes.byref(work_area), 0)
         
         console_width = 800
         console_height = 400
         
-        x = 0
-        y = screen_height - console_height
+        x = work_area.left
+        y = work_area.bottom - console_height
         
         print(f"📐 Repositioning console to bottom-left ({x}, {y})...")
         
@@ -820,45 +777,9 @@ def reposition_console_window():
     except Exception as e:
         print(f"⚠️  Console reposition failed: {e}\n")
 
-def show_update_status():
-    """Display update status (can be triggered by hotkey or command)"""
-    status = get_status()
-    
-    print("\n╔════════════════════════════════════════╗")
-    print("║        AUTO-UPDATE STATUS              ║")
-    print("╠════════════════════════════════════════╣")
-    print(f"║ Enabled:     {str(status.get('enabled', False)):20} ║")
-    print(f"║ Version:      {status.get('current_version', 'unknown'):20} ║")
-    print(f"║ Pending:      {str(status.get('update_pending', False)):20} ║")
-    print(f"║ Next Check:   {status.get('next_check', 'N/A') or 'N/A':20} ║")
-    print("╚════════════════════════════════════════╝")
-    
-    if status.get('update_ready'):
-        print("\n⚠️  UPDATE READY: Restart to apply new version")
-
 def run_watchdog() -> None:
     log = setup_logger()
 
-        # === AUTO-UPDATE CHECK (at startup) ===
-    try:
-        update_result = check_updates()
-        
-        if update_result:
-            if update_result.get('ready_to_apply'):
-                log.info("╔════════════════════════════════════════╗")
-                log.info("║  🔄 UPDATE READY                       ║")
-                log.info(f"║  New version: {update_result.get('latest_version'):20} ║")
-                log.info("║  Restart to apply update               ║")
-                log.info("╚════════════════════════════════════════╝")
-                print("\n" + "="*70)
-                print("🔄 UPDATE READY - Restart watchdog.exe to apply")
-                print("="*70 + "\n")
-            elif update_result.get('update_available'):
-                log.info("⏳ Update found, downloading...")
-                print("⏳ Downloading update...")
-    except Exception as e:
-        log.debug(f"Update check skipped: {e}")
-    
     # Reposition console BEFORE launching anything
     reposition_console_window()
     
@@ -896,7 +817,6 @@ def run_watchdog() -> None:
     print("\n" + "="*70)
     print("🐕 APPLICATION WATCHDOG STARTED")
     print("="*70)
-    print(f"Warm timeout: {warm_timeout} min (if msg contains 'warm')")
     print(f"General timeout: {general_timeout} min (otherwise)")
     print(f"Poll interval: {poll} sec")
     print("="*70 + "\n")
@@ -906,10 +826,22 @@ def run_watchdog() -> None:
     # OPTIMIZATION: Load regions once at startup (not every loop)
     regions = load_yaml(REGIONS_CFG_PATH)
     loop_count = 0
-    
+
     while True:
         loop_count += 1
-        
+
+        # === PERIODIC AUTO-UPDATE CHECK (every ~1 hour, throttled by interval guard) ===
+        try:
+            log.info("Auto-update: checking...")
+            update_result = check_updates()
+            log.info(f"Auto-update result: {update_result}")
+            if update_result and update_result.get('error'):
+                error_msg = update_result['error']
+                if 'Interval' not in error_msg and 'Disabled' not in error_msg:
+                    log.warning(f"Auto-update failed: {error_msg}")
+        except Exception as e:
+            log.warning(f"Auto-update exception: {e}")
+
         # Check window
         if hwnd is None or not win32gui.IsWindow(hwnd):
             print("🔍 Searching for target window...")
