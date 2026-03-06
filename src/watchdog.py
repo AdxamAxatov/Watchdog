@@ -676,12 +676,34 @@ def restart_explorer(log=None):
             log.error("Explorer restart failed: %s", e)
 
 
+def _current_session_id():
+    """Return the Windows session ID for the current process."""
+    try:
+        pid = os.getpid()
+        session = ctypes.c_ulong()
+        if ctypes.windll.kernel32.ProcessIdToSessionId(pid, ctypes.byref(session)):
+            return session.value
+    except Exception:
+        pass
+    return None
+
+
 def count_cs2_instances():
-    """Count how many CS2 (cs2.exe) instances are running"""
+    """Count CS2 instances in the CURRENT user session only.
+
+    On multi-user PCs (2 users, 4 CS2 each = 8 total) we must only
+    count the 4 that belong to our session, not all 8.
+    """
+    my_session = _current_session_id()
     count = 0
-    for proc in psutil.process_iter(['name']):
+    for proc in psutil.process_iter(['name', 'pid']):
         try:
             if proc.info['name'] and proc.info['name'].lower() == 'cs2.exe':
+                if my_session is not None:
+                    sess = ctypes.c_ulong()
+                    if ctypes.windll.kernel32.ProcessIdToSessionId(proc.info['pid'], ctypes.byref(sess)):
+                        if sess.value != my_session:
+                            continue
                 count += 1
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
