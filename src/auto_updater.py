@@ -396,17 +396,17 @@ echo   Watchdog Auto-Updater
 echo ========================================
 echo.
 
-echo [1/5] Stopping ALL {exe_name} instances...
-taskkill /F /IM "{exe_name}" >NUL 2>&1
+echo [1/5] Stopping {exe_name} for current user (%USERNAME%)...
+taskkill /F /FI "IMAGENAME eq {exe_name}" /FI "USERNAME eq %USERNAME%" >NUL 2>&1
 
 echo   Waiting for processes to release file lock...
 :wait
-tasklist /FI "IMAGENAME eq {exe_name}" 2>NUL | find /I "{exe_name}" >NUL
+tasklist /FI "IMAGENAME eq {exe_name}" /FI "USERNAME eq %USERNAME%" 2>NUL | find /I "{exe_name}" >NUL
 if %ERRORLEVEL%==0 (
     timeout /t 1 /nobreak >NUL
     goto wait
 )
-echo   All instances stopped.
+echo   Instances stopped for %USERNAME%.
 
 echo [2/5] Backing up current version...
 if exist "{bak}" del /Q "{bak}"
