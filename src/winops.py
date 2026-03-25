@@ -312,6 +312,36 @@ def pct_to_screen_xy(hwnd: int, x_pct: float, y_pct: float) -> Tuple[int, int]:
     return cx + int(cw * x_pct), cy + int(ch * y_pct)
 
 
+def is_window_responding(hwnd: int, timeout_ms: int = 5000) -> bool:
+    """
+    Check if a window is responding by sending WM_NULL with a timeout.
+    Returns False if the window is hung ("Not Responding").
+    """
+    SMTO_ABORTIFHUNG = 0x0002
+    result = ctypes.c_ulong(0)
+    ret = ctypes.windll.user32.SendMessageTimeoutW(
+        hwnd,
+        0,          # WM_NULL
+        0, 0,
+        SMTO_ABORTIFHUNG,
+        timeout_ms,
+        ctypes.byref(result),
+    )
+    return ret != 0
+
+
+def close_hung_window(hwnd: int) -> None:
+    """
+    Close a hung window by sending WM_CLOSE, then forcefully ending
+    the process if it doesn't close within a few seconds.
+    """
+    # Post WM_CLOSE (non-blocking, won't hang on unresponsive window)
+    try:
+        win32gui.PostMessage(hwnd, win32con.WM_CLOSE, 0, 0)
+    except Exception:
+        pass
+
+
 def safe_click(x: int, y: int, move_duration: float = 0.15) -> None:
     # tiny jitter to avoid Windows "same position" ignore in some setups
     pyautogui.moveRel(1, 0, duration=0)

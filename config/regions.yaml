@@ -1,42 +1,38 @@
 log_region_pct:
-  x: 0.2158671586715867
-  y: 0.0392156862745098
-  w: 0.22140221402214022
-  h: 0.0427807486631016
+  x: 0.2159
+  y: 0.0428
+  w: 0.2269
+  h: 0.0517
+
+# Full log box for CS2 instance checker — captures all visible lines
+logbox_full_pct:
+  x: 0.2159
+  y: 0.0428
+  w: 0.2269
+  h: 0.0517
 
 button_point_pct:
-  x: 0.5839483394833949
-  y: 0.47771836007130125
-
-# log_scroll_point_pct:
-#   x: 0.4327   # Scroll bar (right)
-#   y: 0.0499   # TOP (latest messages here!)
+  x: 0.5775
+  y: 0.385
 
 kill_all_cs2_point_pct:
-  x: 0.8496  
-  y: 0.7094
-  
+  x: 0.8054
+  y: 0.713
+ 
 panel:
-  dir: "C:/Users/SinFermera/Desktop/FSM_PANEL v.2.7.1"
+  dir: "C:/Users/SinFermera2/Downloads/FSM_PANEL v.2.8.0"
   
   first_run:
     initial_wait_seconds: 10
     force_on_ocr_fail: true  # If OCR fails, run clicks anyway
     
     clicks:
-      - { x_pct: 0.5747, y_pct: 0.8093, wait_s: 2.0 }  # Click 1
-      - { x_pct: 0.5655, y_pct: 0.6631, wait_s: 2.0 }  # Click 2
-      - { x_pct: 0.8238, y_pct: 0.7825, wait_s: 2.0 }  # Click 3
+      - { x_pct: 0.5932, y_pct: 0.7736, wait_s: 2.0 }  # Click 1
+      - { x_pct: 0.5803, y_pct: 0.6471, wait_s: 2.0 }  # Click 2
+      - { x_pct: 0.8469, y_pct: 0.7843, wait_s: 2.0 }  # Click 3
 
-# steam_route:
-#   exe: "C:/Users/SinFermera/Desktop/SteamRouteTool/SteamRouteTool.exe"
-#   process_name: "SteamRouteTool.exe"  # This is critical for duplicate detection!
-#   launch_with_panel: true
 
 paths:
-  # expressvpn_exe:
-  #   - "C:/Program Files (x86)/ExpressVPN/expressvpn-ui/ExpressVPN.exe"
-
   memreduct_exe:
     - "C:/Program Files/Mem Reduct/MemReduct.exe"
 

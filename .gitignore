@@ -12,3 +12,4 @@ third_party/
 pyinstxtractor/
 CLAUDE.md
 config/update_config.yaml
+config/boot_update_config.yaml

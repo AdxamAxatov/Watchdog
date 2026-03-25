@@ -45,6 +45,7 @@ class GitHubAutoUpdater:
         'github_api_timeout': 10,
         'download_timeout': 60,
         'github_token': None,
+        'task_scheduler_name': '',
     }
     
     def __init__(self, config_path: Optional[str] = None):
@@ -145,6 +146,7 @@ class GitHubAutoUpdater:
         self.check_interval_hours = self.config['check_interval_hours']
         self.silent_mode = self.config.get('silent_mode', True)
         self.github_token = self.config.get('github_token')
+        self.task_scheduler_name = self.config.get('task_scheduler_name', '').strip()
         self.api_url = f"https://api.github.com/repos/{self.repo_owner}/{self.repo_name}/releases/latest"
     
     def _setup_paths(self):
@@ -161,8 +163,9 @@ class GitHubAutoUpdater:
     def _cleanup_old_downloads(self):
         """FIXED Issue #8: Clean up old download files (keep last 2)"""
         try:
+            exe_base = self.executable_name.replace('.exe', '')
             downloads = sorted(
-                self.temp_dir.glob("Watchdog_*.exe"),
+                self.temp_dir.glob(f"{exe_base}_*.exe"),
                 key=lambda p: p.stat().st_mtime,
                 reverse=True
             )
@@ -265,34 +268,40 @@ class GitHubAutoUpdater:
         except:
             return latest != self.current_version
     
-    def download_update(self, url: str, target_path: Path) -> bool:
-        try:
-            logger.info(f"Downloading: {url.split('/')[-1]}")
-            timeout = self.config.get('download_timeout', 60)
-            
-            # FIXED Issue #4: Use token for downloads too
-            headers = {}
-            if self.github_token:
-                headers['Authorization'] = f'token {self.github_token}'
-            
-            response = requests.get(url, stream=True, timeout=timeout, headers=headers)
-            response.raise_for_status()
-            
-            total_size = int(response.headers.get('content-length', 0))
-            downloaded = 0
-            
-            with open(target_path, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    if chunk:
-                        f.write(chunk)
-                        downloaded += len(chunk)
-            
-            logger.info(f"Downloaded: {downloaded} bytes")
-            return True
-        except Exception as e:
-            logger.error(f"Download failed: {e}")
-            target_path.unlink(missing_ok=True)
-            return False
+    def download_update(self, url: str, target_path: Path, max_retries: int = 3) -> bool:
+        timeout = self.config.get('download_timeout', 120)
+
+        headers = {}
+        if self.github_token:
+            headers['Authorization'] = f'token {self.github_token}'
+
+        for attempt in range(1, max_retries + 1):
+            try:
+                logger.info(f"Downloading: {url.split('/')[-1]} (attempt {attempt}/{max_retries})")
+
+                response = requests.get(url, stream=True, timeout=timeout, headers=headers)
+                response.raise_for_status()
+
+                total_size = int(response.headers.get('content-length', 0))
+                downloaded = 0
+
+                with open(target_path, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+                            downloaded += len(chunk)
+
+                logger.info(f"Downloaded: {downloaded} bytes")
+                return True
+            except Exception as e:
+                logger.error(f"Download attempt {attempt}/{max_retries} failed: {e}")
+                target_path.unlink(missing_ok=True)
+                if attempt < max_retries:
+                    wait = 10 * attempt  # 10s, 20s
+                    logger.info(f"Retrying in {wait}s...")
+                    time.sleep(wait)
+
+        return False
     
     def verify_download(self, file_path: Path, expected_size: int = None, expected_sha256: str = None) -> bool:
         """FIXED Issue #6: Added SHA256 verification"""
@@ -388,6 +397,7 @@ class GitHubAutoUpdater:
             new = str(new_executable).replace('%', '%%')
             bak = str(backup_exe).replace('%', '%%')
             lck = str(lock_file).replace('%', '%%')
+            task_name = self.task_scheduler_name
 
             bat = f"""@echo off
 title Watchdog Auto-Updater
@@ -434,7 +444,16 @@ if %ERRORLEVEL% NEQ 0 (
 )
 
 echo [4/5] Starting updated Watchdog...
-start "" "{cur}"
+if "{task_name}" NEQ "" (
+    echo   Using Task Scheduler: {task_name}
+    schtasks /Run /TN "{task_name}"
+    if %ERRORLEVEL% NEQ 0 (
+        echo   Task Scheduler failed, falling back to direct start...
+        start "" "{cur}"
+    )
+) else (
+    start "" "{cur}"
+)
 
 echo [5/5] Cleanup...
 del /Q "{lck}" 2>NUL
@@ -522,7 +541,8 @@ exit
         else:
             logger.warning("No SHA256 in release notes - skipping checksum verification")
         
-        download_path = self.temp_dir / f"Watchdog_{latest}_{asset['name']}"
+        exe_base = self.executable_name.replace('.exe', '')
+        download_path = self.temp_dir / f"{exe_base}_{latest}_{asset['name']}"
         if download_path.exists():
             download_path.unlink()
         
