@@ -314,9 +314,31 @@ def pct_to_screen_xy(hwnd: int, x_pct: float, y_pct: float) -> Tuple[int, int]:
 
 def is_window_responding(hwnd: int, timeout_ms: int = 5000) -> bool:
     """
-    Check if a window is responding by sending WM_NULL with a timeout.
-    Returns False if the window is hung ("Not Responding").
+    Check if a window is responding.
+    Uses three methods:
+      1. IsHungAppWindow — same API Windows uses to show "Not Responding"
+      2. Title check — detects "(Not Responding)" / "Не отвечает" suffix
+      3. SendMessageTimeout with WM_NULL — fallback message-based check
+    Returns False if any method detects the window as hung.
     """
+    # 1. IsHungAppWindow — most reliable, matches Windows' own ghost window detection
+    try:
+        if ctypes.windll.user32.IsHungAppWindow(hwnd):
+            return False
+    except Exception:
+        pass
+
+    # 2. Title-based detection (covers English and Russian locales)
+    try:
+        title = win32gui.GetWindowText(hwnd).lower()
+        hung_indicators = ["not responding", "не отвечает"]
+        for indicator in hung_indicators:
+            if indicator in title:
+                return False
+    except Exception:
+        pass
+
+    # 3. SendMessageTimeout with WM_NULL
     SMTO_ABORTIFHUNG = 0x0002
     result = ctypes.c_ulong(0)
     ret = ctypes.windll.user32.SendMessageTimeoutW(

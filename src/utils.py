@@ -24,7 +24,14 @@ def load_yaml(rel_path: str) -> dict:
         # 2) Fallback to bundled PyInstaller internal files
         abs_path = os.path.join(runtime_root(), rel_path)
 
-    with open(abs_path, "r", encoding="utf-8") as f:
+    for enc in ("utf-8", "cp1252", "cp1251"):
+        try:
+            with open(abs_path, "r", encoding=enc) as f:
+                return yaml.safe_load(f)
+        except UnicodeDecodeError:
+            continue
+    # Last resort: ignore bad bytes
+    with open(abs_path, "r", encoding="utf-8", errors="replace") as f:
         return yaml.safe_load(f)
 
 def setup_logger():
