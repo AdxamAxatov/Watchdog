@@ -1,0 +1,30 @@
+# Mouse pointer coordinates for each step.
+# Run calibrate.py to populate these values.
+#
+# Each step has x, y in screen pixels.
+
+steps:
+  drop_stats_button:
+    x:
+    y:
+  week_dropdown:
+    x:
+    y:
+  week_option:
+    x:
+    y:
+  generate_report_button:
+    x:
+    y:
+
+# Delay (seconds) between clicks. Increase if the app is slow.
+click_delay: 1.0
+
+# Initial delay before the first click (lets the target window come to focus).
+startup_delay: 2.0
+
+# Which week to pick from the dropdown.
+#   "current"  - current ISO week
+#   "previous" - previous ISO week (typical for a weekly report job)
+#   integer N  - the Nth item in the dropdown (1-based), used only as a fallback
+week_selection: previous
