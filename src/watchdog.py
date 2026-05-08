@@ -26,7 +26,7 @@ from utils import load_yaml, setup_logger
 from window_connector import find_hwnd_by_title_substring
 from layout import normalize_window_bottom_right
 from auto_updater import check_updates, get_status
-from heartbeat import write_heartbeat
+from heartbeat import write_heartbeat, sleep_with_heartbeat
 from winops import force_foreground
 from pathlib import Path
 
@@ -669,52 +669,6 @@ def _current_session_id():
     return None
 
 
-def is_launch_in_progress(hwnd: int, regions: dict, log=None, max_age_minutes: float = 10.0) -> bool:
-    """
-    OCR the log box and check if there's a recent "Launching" message.
-    Returns True if a "Launching" entry exists and is younger than max_age_minutes.
-    """
-    try:
-        ensure_normalized(hwnd)
-        cl, ct, cr, cb = win32gui.GetClientRect(hwnd)
-        client_w = cr - cl
-        client_h = cb - ct
-
-        r = regions.get("logbox_full_pct")
-        if not r:
-            if log:
-                log.warning("logbox_full_pct not configured in regions.yaml")
-            return False
-        log_region = {
-            "x": int(r["x"] * client_w),
-            "y": int(r["y"] * client_h),
-            "w": int(r["w"] * client_w),
-            "h": int(r["h"] * client_h),
-        }
-
-        img = capture_logbox_client(hwnd, log_region)
-        text = normalize_text_for_parsing((ocr_log_text(img) or "").strip())
-
-        # Search all timestamped entries for one containing "launching"
-        for m in ENTRY_RE.finditer(text):
-            msg = (m.group("msg") or "").strip()
-            if "launching" not in msg.lower():
-                continue
-            hh = int(m.group("hh"))
-            mm = int(m.group("mm"))
-            mins = minutes_since_hhmm(hh, mm)
-            if log:
-                log.info("Found 'Launching' at %02d:%02d (%.1f min ago)", hh, mm, mins)
-            print(f"Found 'Launching' at {hh:02d}:{mm:02d} ({mins:.1f}m ago)")
-            if mins < max_age_minutes:
-                return True
-
-    except Exception as e:
-        if log:
-            log.warning("is_launch_in_progress OCR failed: %s", e)
-    return False
-
-
 def count_cs2_instances():
     """Count CS2 instances in the CURRENT user session only.
 
@@ -737,6 +691,29 @@ def count_cs2_instances():
     return count
 
 
+def cs2_youngest_age_seconds():
+    """Return age in seconds of the youngest cs2.exe in the current session,
+    or None if no cs2.exe is running. Used to skip kill+relaunch while CS2
+    is still mid-launch (replaces the old OCR-based 'Launching' detector)."""
+    my_session = _current_session_id()
+    youngest = None
+    now = time.time()
+    for proc in psutil.process_iter(['name', 'pid', 'create_time']):
+        try:
+            if proc.info['name'] and proc.info['name'].lower() == 'cs2.exe':
+                if my_session is not None:
+                    sess = ctypes.c_ulong()
+                    if ctypes.windll.kernel32.ProcessIdToSessionId(proc.info['pid'], ctypes.byref(sess)):
+                        if sess.value != my_session:
+                            continue
+                age = now - proc.info['create_time']
+                if youngest is None or age < youngest:
+                    youngest = age
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+    return youngest
+
+
 def check_cs2_instance_count(hwnd, regions, expected=4, log=None):
     """
     Check if exactly 4 CS2 instances running.
@@ -752,11 +729,29 @@ def check_cs2_instance_count(hwnd, regions, expected=4, log=None):
     if log:
         log.warning("CS2 count wrong: %d (expected %d)", count, expected)
 
-    # Check if a launch is already in progress (< 10 min old)
-    if is_launch_in_progress(hwnd, regions, log=log, max_age_minutes=10.0):
-        print(f"CS2: {count}/{expected} - launch in progress, skipping fix")
+    # Skip the fix if CS2Validator (separate exe, runs from main user) is
+    # currently validating game files. Validator drops a flag in the shared
+    # ProgramData dir before triggering Steam; flag has a 30-min TTL so if
+    # validator crashes mid-run we auto-resume.
+    pause_flag = Path(r"C:\ProgramData\Watchdog\cs2_validation_in_progress.flag")
+    try:
+        if pause_flag.exists():
+            flag_age = time.time() - pause_flag.stat().st_mtime
+            if flag_age < 30 * 60:
+                if log:
+                    log.info("Skipping CS2 fix: validator running (flag %.0fs old)", flag_age)
+                return False
+    except Exception as e:
         if log:
-            log.info("Skipping CS2 fix: 'Launching' message is recent (< 10 min)")
+            log.warning("Pause flag read error: %s", e)
+
+    # Skip the fix if any cs2.exe in this session was started recently — the
+    # panel is mid-launch and killing it now would just restart the cycle.
+    youngest_age = cs2_youngest_age_seconds()
+    if youngest_age is not None and youngest_age < 300:  # 5 min
+        print(f"CS2: {count}/{expected} - launch in progress (youngest {youngest_age:.0f}s old), skipping fix")
+        if log:
+            log.info("Skipping CS2 fix: youngest cs2.exe is %.0fs old (< 5 min)", youngest_age)
         return False
 
     print(f"CS2: {count}/{expected} - fixing...")
@@ -769,8 +764,13 @@ def check_cs2_instance_count(hwnd, regions, expected=4, log=None):
 
     try:
         ensure_normalized(hwnd)
-        win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
-        win32gui.SetForegroundWindow(hwnd)
+        if not force_foreground(hwnd, tries=8, sleep_s=0.2):
+            fg = win32gui.GetForegroundWindow()
+            fg_title = win32gui.GetWindowText(fg) if fg else ""
+            if log:
+                log.error("CS2 fix: could not focus panel — blocker hwnd=%s title=%r", fg, fg_title)
+            print(f"CS2 fix: failed to focus panel (blocked by hwnd={fg} title={fg_title!r}) — aborting click")
+            return False
         time.sleep(0.5)
 
         cl, ct, cr, cb = win32gui.GetClientRect(hwnd)
@@ -858,7 +858,7 @@ def run_watchdog() -> None:
     last_action_ts = 0.0
     last_logged_latest_line = None
     steam_route_launched = False
-    first_run_completed_pids = set()  # Track PIDs we've already run first-run on
+    first_run_completed_pids: dict[int, None] = {}  # insertion-ordered "set" of PIDs we've already onboarded
     last_explorer_restart_ts = time.time()  # Periodic explorer restart every 30 min
     last_cs2_check_ts = 0.0  # CS2 instance check every 5 min
     # Stagger first update check by 0-120s so dual-session users don't download simultaneously
@@ -958,7 +958,7 @@ def run_watchdog() -> None:
                             log.info("First-run attempt %d/3 for PID %d", attempt, pid)
                             success = run_panel_first_run_if_needed(hwnd, regions, log=log, force=True)
                             if success:
-                                first_run_completed_pids.add(pid)
+                                first_run_completed_pids[pid] = None
                                 log.info("First-run completed for PID %d", pid)
                                 break
                             else:
@@ -991,11 +991,11 @@ def run_watchdog() -> None:
             if _pid not in first_run_completed_pids:
                 log.info("First-run pending for PID %d — retrying this loop", _pid)
                 if run_panel_first_run_if_needed(hwnd, regions, log=log, force=True):
-                    first_run_completed_pids.add(_pid)
+                    first_run_completed_pids[_pid] = None
                     log.info("First-run completed for PID %d (deferred)", _pid)
                 else:
                     log.warning("First-run still failing for PID %d — will retry next loop", _pid)
-                    time.sleep(poll)
+                    sleep_with_heartbeat("watchdog", poll)
                     continue
         except Exception as _e:
             log.warning("First-run pending check failed: %s", _e)
@@ -1031,7 +1031,7 @@ def run_watchdog() -> None:
 
         except Exception as e:
             log.exception("Capture failed: %s", e)
-            time.sleep(poll)
+            sleep_with_heartbeat("watchdog", poll)
             continue
 
         # Parse timestamps
@@ -1066,7 +1066,7 @@ def run_watchdog() -> None:
 
         if minutes_ago is None:
             log.info("No parseable entry.")
-            time.sleep(poll)
+            sleep_with_heartbeat("watchdog", poll)
             continue
 
         # Only print when the latest entry changes
@@ -1102,9 +1102,10 @@ def run_watchdog() -> None:
         #         log.warning("SteamRoute crashed, relaunching")
         #         launch_steam_route_if_configured(regions, log=log)
 
-        # PID tracking cleanup
+        # PID tracking cleanup — dict preserves insertion order, so [-10:]
+        # of items() really is the 10 most-recently-added PIDs.
         if len(first_run_completed_pids) > 20:
-            first_run_completed_pids = set(list(first_run_completed_pids)[-10:])
+            first_run_completed_pids = dict(list(first_run_completed_pids.items())[-10:])
 
         # Periodic explorer restart (30 min)
         if time.time() - last_explorer_restart_ts >= 30 * 60:
@@ -1112,12 +1113,12 @@ def run_watchdog() -> None:
             restart_explorer(log=log)
             last_explorer_restart_ts = time.time()
 
-        # CS2 instance check (every 5 min)
-        if time.time() - last_cs2_check_ts >= 300:
+        # CS2 instance check (every 2 min) — cheap process-table read
+        if time.time() - last_cs2_check_ts >= 120:
             check_cs2_instance_count(hwnd, regions, expected=4, log=log)
             last_cs2_check_ts = time.time()
 
-        time.sleep(poll)
+        sleep_with_heartbeat("watchdog", poll)
 
 if __name__ == "__main__":
     run_watchdog()

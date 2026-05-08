@@ -10,7 +10,7 @@ from steps.rdp import run as rdp_run
 from steps.windows_focuser import run as focus_run
 from utils import load_yaml, exe_dir
 from auto_updater import check_updates
-from heartbeat import write_heartbeat
+from heartbeat import write_heartbeat, sleep_with_heartbeat
 
 
 def setup_boot_logger() -> logging.Logger:
@@ -86,7 +86,7 @@ def focus_run_with_updates(log, last_update_check):
             check_boot_update(log)
             last_update_check = time.time()
 
-        time.sleep(focus_interval_seconds)
+        sleep_with_heartbeat("boot", focus_interval_seconds)
 
 
 def main():
@@ -119,6 +119,7 @@ def main():
         log.exception("MemReduct step failed")
         raise
 
+    write_heartbeat("boot")  # post-MemReduct progress beat
     time.sleep(2)
 
     # Step 2: RDP
@@ -132,6 +133,7 @@ def main():
         log.exception("RDP step failed")
         raise
 
+    write_heartbeat("boot")  # post-RDP progress beat
     log.info("=== BOOT COMPLETE ===")
     
     # NEW: Step 3: Focus Maintenance (runs continuously, with periodic update checks)

@@ -21,3 +21,16 @@ def write_heartbeat(name: str) -> None:
         path.write_text(str(time.time()), encoding="utf-8")
     except Exception:
         pass
+
+
+def sleep_with_heartbeat(name: str, total_seconds: float, chunk_seconds: float = 30) -> None:
+    """Sleep for total_seconds, writing a heartbeat at the start of every
+    chunk_seconds. Lets the external health checker detect a freeze within
+    chunk_seconds, not at the program's natural loop cadence."""
+    end = time.time() + total_seconds
+    while True:
+        write_heartbeat(name)
+        remaining = end - time.time()
+        if remaining <= 0:
+            break
+        time.sleep(min(chunk_seconds, remaining))
