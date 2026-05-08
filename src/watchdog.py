@@ -28,6 +28,7 @@ from layout import normalize_window_bottom_right
 from auto_updater import check_updates, get_status
 from heartbeat import write_heartbeat
 from winops import force_foreground
+from steps.cs2_validate import run as cs2_validate_run
 from pathlib import Path
 
 
@@ -892,6 +893,17 @@ def run_watchdog() -> None:
             except Exception as e:
                 log.warning(f"Auto-update exception: {e}")
             last_update_check_ts = time.time()
+
+        # === DAILY CS2 FILE VALIDATION (marker-gated, ~24h interval) ===
+        try:
+            if cs2_validate_run():
+                # Steam will close CS2 to validate. Defer the 5-min instance
+                # check by ~15 min so Watchdog doesn't kill/relaunch CS2 while
+                # Steam is mid-validation.
+                last_cs2_check_ts = time.time() + (15 * 60) - 300
+                log.info("CS2 validation triggered; instance-count check paused 15min")
+        except Exception as e:
+            log.warning("CS2 validation check failed: %s", e)
 
         # Check window
         if hwnd is None or not win32gui.IsWindow(hwnd):
