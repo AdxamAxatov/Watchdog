@@ -56,6 +56,18 @@ function Test-IsAdmin {
 # Helpers
 # ---------------------------------------------------------------------------
 
+function Get-RegProperty {
+    # Safe read: returns the property value if the key + property exist, $null otherwise.
+    # Wraps the StrictMode-unsafe '(Get-ItemProperty ...).Prop' pattern.
+    param([string]$Path, [string]$Name)
+    try {
+        $obj = Get-ItemProperty -Path $Path -Name $Name -ErrorAction Stop
+        return $obj.$Name
+    } catch {
+        return $null
+    }
+}
+
 function Set-RegValue {
     param(
         [string]$Path,
@@ -235,19 +247,129 @@ function Suppress-Notifications {
 }
 
 # ---------------------------------------------------------------------------
+# Verdict / health check
+# ---------------------------------------------------------------------------
+
+$StatusPath  = Join-Path $LogsDir 'windows_lockdown_status.txt'
+$HistoryPath = Join-Path $LogsDir 'windows_lockdown_history.log'
+
+function Test-LockdownState {
+    # Returns OrderedDictionary: check-name -> $true (compliant) / $false (broken).
+    # Read-only; safe to call as non-admin.
+    $r = [ordered]@{}
+
+    # Services: should be Stopped AND Start=4 (Disabled)
+    foreach ($s in 'wuauserv','UsoSvc','DoSvc','WaaSMedicSvc','edgeupdate','edgeupdatem') {
+        $svc = Get-Service -Name $s -ErrorAction SilentlyContinue
+        if (-not $svc) { $r["svc:$s"] = $true; continue }   # not present = compliant
+        $start = Get-RegProperty "HKLM:\SYSTEM\CurrentControlSet\Services\$s" 'Start'
+        $r["svc:$s"] = ($svc.Status -ne 'Running') -and ($start -eq 4)
+    }
+
+    # Task paths: every task under each path should be Disabled
+    foreach ($p in '\Microsoft\Windows\WindowsUpdate\','\Microsoft\Windows\UpdateOrchestrator\','\Microsoft\Windows\WaaSMedic\','\Microsoft\Windows\InstallService\') {
+        $tasks = Get-ScheduledTask -TaskPath $p -ErrorAction SilentlyContinue
+        if (-not $tasks) { $r["tasks:$($p.Trim('\'))"] = $true; continue }
+        $bad = @($tasks | Where-Object { $_.State -ne 'Disabled' })
+        $r["tasks:$($p.Trim('\'))"] = ($bad.Count -eq 0)
+    }
+
+    # Headline policy keys
+    $au = Get-RegProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU' 'NoAutoUpdate'
+    $r['policy:WU.NoAutoUpdate'] = ($au -eq 1)
+
+    $eu = Get-RegProperty 'HKLM:\SOFTWARE\Policies\Microsoft\EdgeUpdate' 'UpdateDefault'
+    $r['policy:Edge.UpdateDefault'] = ($eu -eq 0)
+
+    $cc = Get-RegProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent' 'DisableWindowsConsumerFeatures'
+    $r['policy:Cloud.NoConsumerFeatures'] = ($cc -eq 1)
+
+    $ws = Get-RegProperty 'HKLM:\SOFTWARE\Policies\Microsoft\WindowsStore' 'AutoDownload'
+    $r['policy:Store.AutoDownload'] = ($ws -eq 2)
+
+    # Our own scheduled tasks should exist and be Ready (only meaningful post-install)
+    foreach ($n in $TaskAtStartup, $TaskDaily) {
+        $t = Get-ScheduledTask -TaskPath ('\{0}\' -f $TaskFolder) -TaskName $n -ErrorAction SilentlyContinue
+        $r["watchdog:$n"] = ($null -ne $t) -and ($t.State -ne 'Disabled')
+    }
+
+    return $r
+}
+
+function Get-Verdict {
+    param($Pre, $Post)
+    $brokenAfter = @($Post.GetEnumerator() | Where-Object { -not $_.Value } | ForEach-Object { $_.Key })
+    $brokenBefore = @($Pre.GetEnumerator() | Where-Object { -not $_.Value } | ForEach-Object { $_.Key })
+    if ($brokenAfter.Count -eq 0) {
+        if ($brokenBefore.Count -eq 0) { return 'CLEAN' }
+        return 'DRIFT_FIXED'
+    }
+    if ($brokenAfter.Count -lt $brokenBefore.Count) { return 'PARTIAL_FAIL' }
+    return 'HARD_FAIL'
+}
+
+function Write-Verdict {
+    param([string]$Verdict, $Pre, $Post)
+    $broken = @($Post.GetEnumerator() | Where-Object { -not $_.Value } | ForEach-Object { $_.Key })
+    $compliant = ($Post.Values | Where-Object { $_ }).Count
+    $total = $Post.Count
+    $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+    $brokenStr = if ($broken.Count -eq 0) { '(none)' } else { $broken -join ', ' }
+
+    # Per-check rows for the snapshot file
+    $rows = ($Post.GetEnumerator() | ForEach-Object {
+        $mark = if ($_.Value) { 'OK    ' } else { 'BROKEN' }
+        "  [$mark] $($_.Key)"
+    }) -join "`r`n"
+
+    $snapshot = @"
+windows_lockdown.ps1 status snapshot
+====================================
+Last run:  $ts
+Verdict:   $Verdict
+Score:     $compliant / $total checks compliant
+Broken:    $brokenStr
+
+Per-check:
+$rows
+
+Verdict legend:
+  CLEAN        - nothing was broken, nothing changed
+  DRIFT_FIXED  - Windows resurrected something; we re-disabled it (expected on daily timer)
+  PARTIAL_FAIL - some checks still broken after our fix attempt; needs attention
+  HARD_FAIL    - lockdown did not apply at all (admin? script error?)
+"@
+    Set-Content -Path $StatusPath -Value $snapshot -Encoding utf8
+
+    # One-line history record
+    $line = "$ts | $Verdict | $compliant/$total | broken=[$brokenStr]"
+    Add-Content -Path $HistoryPath -Value $line -Encoding utf8
+
+    Write-Log "verdict: $Verdict ($compliant/$total compliant) broken=[$brokenStr]"
+}
+
+# ---------------------------------------------------------------------------
 # Master apply
 # ---------------------------------------------------------------------------
 
 function Invoke-WindowsLockdown {
     Write-Log '======== Invoke-WindowsLockdown begin ========'
     Write-Log "Running as: $([System.Security.Principal.WindowsIdentity]::GetCurrent().Name)"
+
+    $pre = Test-LockdownState
+
     Disable-WindowsUpdate
     Disable-WaaSMedic
     Disable-EdgeAutoUpdate
     Disable-StoreAutoUpdate
     Disable-OOBERelapses
     Suppress-Notifications
-    Write-Log '======== Invoke-WindowsLockdown end ========'
+
+    $post = Test-LockdownState
+    $verdict = Get-Verdict -Pre $pre -Post $post
+    Write-Verdict -Verdict $verdict -Pre $pre -Post $post
+
+    Write-Log "======== Invoke-WindowsLockdown end - $verdict ========"
 }
 
 # ---------------------------------------------------------------------------
@@ -322,7 +444,7 @@ function Show-Status {
     foreach ($s in 'wuauserv','UsoSvc','DoSvc','WaaSMedicSvc','edgeupdate','edgeupdatem') {
         $svc = Get-Service -Name $s -ErrorAction SilentlyContinue
         if ($svc) {
-            $start = (Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Services\$s" -Name Start -ErrorAction SilentlyContinue).Start
+            $start = Get-RegProperty "HKLM:\SYSTEM\CurrentControlSet\Services\$s" 'Start'
             Write-Log ("svc {0,-14} status={1,-8} startValue={2}" -f $s, $svc.Status, $start)
         } else {
             Write-Log ("svc {0,-14} (not present)" -f $s)
@@ -336,12 +458,32 @@ function Show-Status {
             }
         }
     }
-    $au = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU'
-    if (Test-Path $au) {
-        $v = (Get-ItemProperty $au -ErrorAction SilentlyContinue).NoAutoUpdate
-        Write-Log "policy NoAutoUpdate = $v"
-    } else {
+    $v = Get-RegProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU' 'NoAutoUpdate'
+    if ($null -eq $v) {
         Write-Log 'policy NoAutoUpdate = (key absent)'
+    } else {
+        Write-Log "policy NoAutoUpdate = $v"
+    }
+
+    # Compute current verdict (read-only) so -Status is also a health report
+    $now = Test-LockdownState
+    $brokenNow = @($now.GetEnumerator() | Where-Object { -not $_.Value } | ForEach-Object { $_.Key })
+    $compliantNow = ($now.Values | Where-Object { $_ }).Count
+    $totalNow = $now.Count
+    Write-Log "current compliance: $compliantNow / $totalNow checks - broken=[$(if ($brokenNow.Count -eq 0) {'(none)'} else {$brokenNow -join ', '})]"
+
+    # Last recorded verdict (from previous Apply run)
+    if (Test-Path $StatusPath) {
+        Write-Log "--- last status snapshot ($StatusPath) ---"
+        Get-Content $StatusPath -ErrorAction SilentlyContinue | ForEach-Object { Write-Log $_ }
+    } else {
+        Write-Log "no status snapshot yet (script has not been -Install'd or -Apply'd here)"
+    }
+
+    # Tail of history log
+    if (Test-Path $HistoryPath) {
+        Write-Log "--- last 10 history entries ($HistoryPath) ---"
+        Get-Content $HistoryPath -Tail 10 -ErrorAction SilentlyContinue | ForEach-Object { Write-Log $_ }
     }
 }
 

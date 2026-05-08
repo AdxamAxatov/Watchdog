@@ -10,6 +10,28 @@ All commands assume an **elevated PowerShell** (Run as Administrator) and
 the script at `<deploy>\Boot\windows_lockdown.ps1` with `<deploy>\logs\`
 sibling to it (matches the heartbeat convention). Adjust `cd` accordingly.
 
+### Where things get logged
+
+After every `-Apply` (whether you ran it manually or the daily timer did),
+three files in `..\logs\` are updated. Glance at these to know if it's
+working without scrolling through chatter:
+
+| File | What it tells you | When it changes |
+|---|---|---|
+| `windows_lockdown_status.txt` | **Most recent verdict.** One block. "CLEAN 16/16" / "DRIFT_FIXED" / "PARTIAL_FAIL" / "HARD_FAIL", with per-check OK/BROKEN list. | Overwritten each `-Apply` run |
+| `windows_lockdown_history.log` | **Trend over time.** One line per run: `<ts> | VERDICT | <compliant>/<total> | broken=[...]`. Tail it to scan a week of runs in seconds. | Appended each `-Apply` run |
+| `windows_lockdown.log` | **Full chatter** — every reg set, svc disable, task disable, with `WARN`/`FAILED` lines for diagnostics. | Appended each run (any mode) |
+
+Verdicts:
+- `CLEAN` — nothing was broken pre-run, nothing changed. Steady state.
+- `DRIFT_FIXED` — Windows resurrected something between daily runs; we re-disabled it. **Expected** behavior on the daily timer.
+- `PARTIAL_FAIL` — some checks remained broken even after the apply. Needs attention.
+- `HARD_FAIL` — apply didn't land at all (admin? script error?).
+
+You can also just run `-Status` any time — it now prints the current
+compliance score, the last status snapshot, and the last 10 history
+entries.
+
 ---
 
 ## Tier 0 — Pre-flight (capture baseline)
@@ -260,15 +282,19 @@ After 7 clean days, fleet rollout.
 
 ## What to send me when reporting
 
-Paste the contents of these files plus a one-line summary:
+The three log files plus a one-liner:
 
 ```powershell
-.\windows_lockdown.ps1 -Status | Tee-Object ..\logs\report_status.txt
-Get-Content ..\logs\windows_lockdown.log -Tail 200 | Out-File ..\logs\report_log_tail.txt
-Get-ScheduledTask -TaskPath '\Watchdog\' | Get-ScheduledTaskInfo | Out-File ..\logs\report_taskinfo.txt
+# These already exist after any -Apply / -Install run. No need to re-run, just collect:
+Get-Content ..\logs\windows_lockdown_status.txt   # current verdict + per-check
+Get-Content ..\logs\windows_lockdown_history.log  # one line per run, all of them
+Get-Content ..\logs\windows_lockdown.log -Tail 200  # full chatter from the most recent run
+
+# Plus our scheduled task health
+Get-ScheduledTask -TaskPath '\Watchdog\' | Get-ScheduledTaskInfo | Format-List TaskName,LastRunTime,LastTaskResult,NextRunTime
 ```
 
-Then the contents of `..\logs\report_*.txt` plus:
+Then the contents of those plus:
 - Which tier you're on
 - Which step failed (if any) — exact line number from the runbook
 - Whether you see any unexpected popups on the rig
