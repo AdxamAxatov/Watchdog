@@ -26,6 +26,8 @@ from utils import load_yaml, setup_logger
 from window_connector import find_hwnd_by_title_substring
 from layout import normalize_window_bottom_right
 from auto_updater import check_updates, get_status
+from heartbeat import write_heartbeat
+from winops import force_foreground
 from pathlib import Path
 
 
@@ -141,23 +143,20 @@ def capture_logbox_client(hwnd: int, log_region: dict) -> np.ndarray:
     y = int(log_region["y"])
     w = int(log_region["w"])
     h = int(log_region["h"])
-    
-    # CRITICAL FIX: Always focus window before screenshot
-    try:
-        win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
-        win32gui.SetForegroundWindow(hwnd)
-        time.sleep(0.3)
-    except Exception as e:
-        print(f"⚠️  Warning: Could not focus window: {e}")
-    
-    # Try Windows API first
-    # capture_window_region_api expects CLIENT coordinates (x, y relative to window)
+
+    # Fast path: PrintWindow/BitBlt works on unfocused, even covered windows —
+    # no need to steal focus from CS2 on every poll.
     img = capture_window_region_api(hwnd, x, y, w, h)
     if img is not None:
         return img
-    
-    # Fallback: pyautogui requires SCREEN coordinates
-    # Convert client coords to screen coords
+
+    # Fallback: pyautogui snapshots the actual screen, so the pixels must
+    # be visible. Only now do we try to bring the window forward.
+    try:
+        win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+        force_foreground(hwnd, tries=3, sleep_s=0.15)
+    except Exception:
+        pass
     cx, cy = client_origin_screen(hwnd)
     screen_left = cx + x
     screen_top = cy + y
@@ -165,87 +164,59 @@ def capture_logbox_client(hwnd: int, log_region: dict) -> np.ndarray:
     return cv2.cvtColor(np.array(shot), cv2.COLOR_RGB2BGR)
 
 
-def scroll_logbox_to_top(hwnd: int, regions: dict, verbose: bool = True) -> bool:
-    """
-    FIXED: Scroll logbox to TOP (where latest messages appear in FSM Panel).
-    
-    FSM Panel shows messages in REVERSE order:
-    - TOP = Latest messages (newest)
-    - BOTTOM = Old messages (oldest)
-    
-    This is opposite of normal logs!
-    
-    Double-clicks the scroll bar near TOP to jump there.
-    
-    Config in regions.yaml:
-        log_scroll_point_pct:
-            x: 0.95    # Right side (scroll bar location)
-            y: 0.08    # TOP area (where latest messages are!)
-    
-    Args:
-        hwnd: Window handle
-        regions: Config dict with log_scroll_point_pct
-        verbose: Print debug info (default True for visibility)
-    
-    Returns:
-        True if scroll attempted, False if not configured
-    """
-    scroll_cfg = regions.get("log_scroll_point_pct")
-    
-    if not scroll_cfg:
-        if verbose:
-            print("⏭️  Auto-scroll disabled (log_scroll_point_pct not configured)")
-        return False
-    
+_LAYOUT_CACHE = None
+
+
+def _get_layout():
+    global _LAYOUT_CACHE
+    if _LAYOUT_CACHE is None:
+        try:
+            app = load_yaml(APP_CFG_PATH)
+            layout = app.get("layout", {}) or {}
+            wd = app.get("watchdog", {}) or {}
+            _LAYOUT_CACHE = {
+                "width": int(layout.get("width", 1100)),
+                "height": int(layout.get("height", 600)),
+                "margin_right": int(layout.get("margin_right", 0)),
+                "margin_bottom": int(layout.get("margin_bottom", 0)),
+                "settle_ms": int(wd.get("settle_after_normalize_ms", 150)),
+            }
+        except Exception:
+            _LAYOUT_CACHE = {
+                "width": 1100, "height": 600,
+                "margin_right": 0, "margin_bottom": 0,
+                "settle_ms": 150,
+            }
+    return _LAYOUT_CACHE
+
+
+def ensure_normalized(hwnd: int) -> None:
+    """Silently resize+reposition the panel window to its calibrated layout.
+    Idempotent. Sleeps `settle_after_normalize_ms` only if the window actually moved.
+    No console or log output."""
     try:
-        # Get window size
-        cl, ct, cr, cb = win32gui.GetClientRect(hwnd)
-        cw = cr - cl
-        ch = cb - ct
-        cx, cy = client_origin_screen(hwnd)
-        
-        # Calculate scroll position
-        x_pct = float(scroll_cfg.get("x", 0.95))
-        y_pct = float(scroll_cfg.get("y", 0.08))  # TOP for FSM Panel!
-        
-        x = cx + int(cw * x_pct)
-        y = cy + int(ch * y_pct)
-        
-        print(f"📜 Scrolling to TOP (where latest messages are)...")
-        print(f"   Position: ({x_pct:.2f}, {y_pct:.2f}) → screen ({x}, {y})")
-        
-        # Focus window first
-        win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
-        win32gui.SetForegroundWindow(hwnd)
-        time.sleep(0.3)
-        
-        # VISUAL: Move mouse slowly so you can see it
-        print(f"   🖱️  Moving mouse to scroll bar...")
-        pyautogui.moveTo(x, y, duration=0.5)  # Slow move (0.5s) for visibility
-        time.sleep(0.2)  # Pause so you can see where it is
-        
-        # Double-click scroll bar to jump to TOP
-        print(f"   🖱️  Double-clicking scroll bar...")
-        pyautogui.doubleClick()
-        
-        # Wait for scroll animation
-        print(f"   ⏳ Waiting for scroll animation...")
-        time.sleep(0.5)  # Longer wait to see scroll happen
-        
-        print(f"   ✅ Scroll complete!")
-        return True
-        
-    except Exception as e:
-        print(f"   ❌ Scroll failed: {e}")
-        return False
+        layout = _get_layout()
+        _, _, moved = normalize_window_bottom_right(
+            hwnd,
+            width=layout["width"],
+            height=layout["height"],
+            margin_right=layout["margin_right"],
+            margin_bottom=layout["margin_bottom"],
+        )
+        if moved:
+            time.sleep(layout["settle_ms"] / 1000)
+    except Exception:
+        pass
 
 def run_panel_first_run_if_needed(hwnd: int, regions: dict, log=None, force: bool = False) -> bool:
     """
     Runs first-run onboarding clicks for panel if OCR detects first-run keywords
     OR if you want it unconditional after launch.
-    
+
     Returns:
-        True if clicks completed successfully, False if failed
+        True if the work completed (clicks ran successfully, OR nothing needed
+        to be done — no clicks configured / first-run not detected when force=False).
+        False only when something was actionable but failed (focus gained lost, etc).
     """
     panel = (regions or {}).get("panel") or {}
     fr = panel.get("first_run") or {}
@@ -253,42 +224,24 @@ def run_panel_first_run_if_needed(hwnd: int, regions: dict, log=None, force: boo
     if not clicks:
         return True  # No clicks needed = success
 
+    ensure_normalized(hwnd)
+
     # Wait AFTER launch so UI has time to show onboarding
     initial_wait = fr.get("initial_wait_seconds", 10)
     print(f"⏳ Waiting {initial_wait}s for first-run screen...")
     time.sleep(initial_wait)
 
-    # CRITICAL FIX: Force focus with verification
+    # Force focus via AttachThreadInput trick (bypasses Windows focus-stealing block)
     print("🎯 Forcing window to foreground...")
-    for attempt in range(3):
-        try:
-            win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
-            win32gui.SetForegroundWindow(hwnd)
-            time.sleep(0.5)
-            
-            # VERIFY focus was gained
-            fg = win32gui.GetForegroundWindow()
-            if fg == hwnd:
-                print("   ✅ Window focused successfully")
-                break
-            else:
-                print(f"   ⚠️  Focus attempt {attempt+1}/3 failed, retrying...")
-                if attempt < 2:
-                    win32gui.BringWindowToTop(hwnd)
-                    time.sleep(0.3)
-        except Exception as e:
-            if log:
-                log.warning("Focus attempt %d failed: %s", attempt+1, e)
-            if attempt < 2:
-                time.sleep(0.3)
-    
-    # Final verification
-    if win32gui.GetForegroundWindow() != hwnd:
-        print("❌ Failed to focus window after 3 attempts")
+    if not force_foreground(hwnd, tries=8, sleep_s=0.2):
+        fg = win32gui.GetForegroundWindow()
+        fg_title = win32gui.GetWindowText(fg) if fg else ""
+        print(f"❌ Failed to focus panel — blocked by hwnd={fg} title={fg_title!r}")
         if log:
-            log.error("Could not focus panel window for first-run clicks")
-        return False  # Failed
-    
+            log.error("Could not focus panel for first-run — blocker hwnd=%s title=%r", fg, fg_title)
+        return False
+
+    print("   ✅ Window focused successfully")
     time.sleep(0.5)  # Extra settle time
 
     # OPTIONAL (recommended): detect first-run screen by OCR
@@ -317,7 +270,7 @@ def run_panel_first_run_if_needed(hwnd: int, regions: dict, log=None, force: boo
     if not should_click:
         if log: log.info("Panel first-run NOT detected, skipping clicks.")
         print("⏭️  First-run screen not detected, skipping clicks")
-        return
+        return True  # Skip is a valid success — nothing to do
 
     if log: log.info("Panel first-run detected (or forced). Running clicks...")
     print(f"🖱️  Running {len(clicks)} first-run click(s)...")
@@ -329,31 +282,19 @@ def run_panel_first_run_if_needed(hwnd: int, regions: dict, log=None, force: boo
     cx, cy = client_origin_screen(hwnd)
 
     for i, step in enumerate(clicks, 1):
-        # CRITICAL FIX: Re-focus if lost, don't abort
-        fg = win32gui.GetForegroundWindow()
-        if fg != hwnd:
+        # Re-focus if lost (uses AttachThreadInput trick)
+        if win32gui.GetForegroundWindow() != hwnd:
             print(f"   ⚠️  Window lost focus before click {i}, re-focusing...")
             if log:
                 log.warning("Panel lost focus before click %d, re-focusing", i)
-            
-            # Try to regain focus
-            try:
-                win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
-                win32gui.SetForegroundWindow(hwnd)
-                time.sleep(0.5)
-                
-                # Verify we got it back
-                if win32gui.GetForegroundWindow() != hwnd:
-                    print(f"   ❌ Failed to regain focus, aborting remaining clicks")
-                    if log:
-                        log.error("Could not regain focus, aborting first-run clicks")
-                    return False  # Failed
-                    
-                print(f"   ✅ Focus regained, continuing...")
-            except Exception as e:
+            if not force_foreground(hwnd, tries=5, sleep_s=0.2):
+                fg = win32gui.GetForegroundWindow()
+                fg_title = win32gui.GetWindowText(fg) if fg else ""
+                print(f"   ❌ Failed to regain focus — blocked by hwnd={fg} title={fg_title!r}")
                 if log:
-                    log.error("Exception regaining focus: %s", e)
-                return False  # Failed
+                    log.error("Could not regain focus for click %d — blocker hwnd=%s title=%r", i, fg, fg_title)
+                return False
+            print(f"   ✅ Focus regained, continuing...")
     
         x_pct = float(step.get("x_pct", step.get("x")))
         y_pct = float(step.get("y_pct", step.get("y")))
@@ -508,6 +449,8 @@ def trigger_recovery_action(hwnd: int, log, app, reason: str):
     log.warning("Recovery triggered: %s", reason)
 
     settle_click_ms = int(app["watchdog"].get("settle_after_click_ms", 2000))
+
+    ensure_normalized(hwnd)
 
     win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
     try:
@@ -732,6 +675,7 @@ def is_launch_in_progress(hwnd: int, regions: dict, log=None, max_age_minutes: f
     Returns True if a "Launching" entry exists and is younger than max_age_minutes.
     """
     try:
+        ensure_normalized(hwnd)
         cl, ct, cr, cb = win32gui.GetClientRect(hwnd)
         client_w = cr - cl
         client_h = cb - ct
@@ -824,6 +768,7 @@ def check_cs2_instance_count(hwnd, regions, expected=4, log=None):
         return False
 
     try:
+        ensure_normalized(hwnd)
         win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
         win32gui.SetForegroundWindow(hwnd)
         time.sleep(0.5)
@@ -879,6 +824,9 @@ def reposition_console_window():
         print(f"⚠️  Console reposition failed: {e}\n")
 
 def run_watchdog() -> None:
+    # Write heartbeat immediately so a startup hang is detectable
+    write_heartbeat("watchdog")
+
     log = setup_logger()
 
     # Reposition console BEFORE launching anything
@@ -898,7 +846,7 @@ def run_watchdog() -> None:
 
     debug_print_ocr = bool(app["watchdog"].get("debug_print_ocr", False))
     save_last_log_image = bool(app["watchdog"].get("save_last_log_image", True))
-    settle_norm_ms = int(app["watchdog"].get("settle_after_normalize_ms", 150))
+    # settle_after_normalize_ms is consumed inside ensure_normalized()
     settle_focus_ms = int(app["watchdog"].get("settle_after_focus_ms", 200))
 
     # Initialize normalize flag based on config
@@ -927,6 +875,9 @@ def run_watchdog() -> None:
 
     while True:
         loop_count += 1
+        write_heartbeat("watchdog")
+        # Reset each iteration so a prior recovery can't stick it off
+        normalize_every = bool(app["watchdog"].get("normalize_every_loop", True))
 
         # === PERIODIC AUTO-UPDATE CHECK (every 1 hour) ===
         if time.time() - last_update_check_ts >= 3600:
@@ -1021,28 +972,34 @@ def run_watchdog() -> None:
                     log.warning("Could not get PID for first-run tracking: %s", e)
                     run_panel_first_run_if_needed(hwnd, regions, log=log, force=True)
 
-                # Normalize window position
-                x, y, moved = normalize_window_bottom_right(
-                    hwnd, width=width, height=height,
-                    margin_right=margin_right, margin_bottom=margin_bottom,
-                )
-                if moved:
-                    log.info("Normalized window after first launch -> %d, %d", x, y)
-                time.sleep(settle_norm_ms / 1000)
+                # Normalize window position (silent, includes settle sleep)
+                ensure_normalized(hwnd)
 
             else:
                 log.info("Found window: hwnd=%s title=%r", hwnd, last_found_title)
 
-        # Normalize window (if allowed)
+        # Normalize window at loop top (silent, idempotent, includes settle sleep)
         if normalize_every:
-            x, y, moved = normalize_window_bottom_right(
-                hwnd, width=width, height=height,
-                margin_right=margin_right, margin_bottom=margin_bottom,
-            )
-            if moved:
-                log.info("Normalized window -> %d, %d", x, y)
-            time.sleep(settle_norm_ms / 1000)
-        
+            ensure_normalized(hwnd)
+
+        # First-run eventual-consistency check: if the initial 3x launch-time
+        # attempts all failed (e.g. CS2 was blocking focus), the panel is up
+        # but its logbox is empty and no work can be done. Keep retrying every
+        # loop until clicks actually land, then mark the PID done.
+        try:
+            _, _pid = win32process.GetWindowThreadProcessId(hwnd)
+            if _pid not in first_run_completed_pids:
+                log.info("First-run pending for PID %d — retrying this loop", _pid)
+                if run_panel_first_run_if_needed(hwnd, regions, log=log, force=True):
+                    first_run_completed_pids.add(_pid)
+                    log.info("First-run completed for PID %d (deferred)", _pid)
+                else:
+                    log.warning("First-run still failing for PID %d — will retry next loop", _pid)
+                    time.sleep(poll)
+                    continue
+        except Exception as _e:
+            log.warning("First-run pending check failed: %s", _e)
+
         try:
             cl, ct, cr, cb = win32gui.GetClientRect(hwnd)
             client_w = cr - cl
@@ -1132,12 +1089,9 @@ def run_watchdog() -> None:
                 remaining = debounce - since_last
                 log.warning("Cooldown (%ds left). %s", int(remaining), trigger_reason)
             else:
-                normalize_every = False
                 print(f"RECOVERY: {trigger_reason}")
                 trigger_recovery_action(hwnd, log, app, trigger_reason)
                 last_action_ts = now_ts
-        else:
-            normalize_every = bool(app["watchdog"].get("normalize_every_loop", True))
 
         # SteamRoute crash check (disabled)
         # if steam_route_launched:

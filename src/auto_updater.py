@@ -75,20 +75,22 @@ class GitHubAutoUpdater:
     
     def _load_config(self, config_path: Optional[str] = None) -> Dict[str, Any]:
         """Load configuration - Prioritizes config/update_config.yaml"""
-        
+        self.config_path: Optional[Path] = None
+
         if config_path:
             path = Path(config_path)
             if path.exists():
+                self.config_path = path
                 return self._parse_config_file(path)
             logger.error(f"Config not found: {config_path}")
             return self.DEFAULT_CONFIG.copy()
-        
+
         # Determine base directory
         if getattr(sys, 'frozen', False):
             exe_dir = Path(sys.executable).parent
         else:
             exe_dir = Path(__file__).parent.parent
-        
+
         # Priority order - dedicated update config FIRST
         search_paths = [
             exe_dir / "config" / "update_config.yaml",
@@ -96,14 +98,15 @@ class GitHubAutoUpdater:
             exe_dir / "config" / "regions.yaml",
             exe_dir / "regions.yaml",
         ]
-        
+
         for path in search_paths:
             if path.exists():
                 config = self._parse_config_file(path)
                 if config:
                     logger.info(f"Config loaded: {path}")
+                    self.config_path = path
                     return config
-        
+
         logger.warning("No config found, using defaults (disabled)")
         return self.DEFAULT_CONFIG.copy()
     
@@ -256,17 +259,24 @@ class GitHubAutoUpdater:
         return None
     
     def version_is_newer(self, latest: str) -> bool:
-        def parse(v: str):
+        def parse(v: str, label: str = ""):
+            # Strict MAJOR.MINOR.PATCH parser.
+            # Malformed values (e.g. "1.09", "1.0", "", "1.0.0-beta") -> (0, 0, 0)
+            # so the update loop self-heals: a valid GitHub release will beat
+            # the broken local version and rewrite the yaml cleanly.
             try:
-                v = v.lstrip('v')
-                parts = v.split('.')
-                return tuple(int(x) for x in parts[:3])
-            except:
+                s = (v or "").lstrip('v').strip()
+                parts = s.split('.')
+                if len(parts) != 3:
+                    logger.warning(f"Version '{v}' ({label}) is not 3-part semver — treating as 0.0.0")
+                    return (0, 0, 0)
+                nums = tuple(int(p) for p in parts)
+                return nums
+            except Exception:
+                logger.warning(f"Version '{v}' ({label}) unparseable — treating as 0.0.0")
                 return (0, 0, 0)
-        try:
-            return parse(latest) > parse(self.current_version)
-        except:
-            return latest != self.current_version
+
+        return parse(latest, "latest") > parse(self.current_version, "current")
     
     def download_update(self, url: str, target_path: Path, max_retries: int = 3) -> bool:
         timeout = self.config.get('download_timeout', 120)
@@ -374,20 +384,36 @@ class GitHubAutoUpdater:
             lock_file.write_text(str(os.getpid()), encoding='utf-8')
 
             # ── Update config version ─────────────────────────────
-            for cfg_path in [exe_dir / "config" / "update_config.yaml", exe_dir / "update_config.yaml"]:
-                if cfg_path.exists():
-                    try:
-                        content = cfg_path.read_text(encoding='utf-8')
-                        content = re.sub(
-                            r'current_version:\s*"[^"]*"',
-                            f'current_version: "{new_version}"',
-                            content
-                        )
-                        cfg_path.write_text(content, encoding='utf-8')
-                        logger.info(f"Config version updated to {new_version}")
-                    except Exception as e:
-                        logger.warning(f"Could not update config version: {e}")
+            # Rewrite the SAME yaml that was loaded, so Boot's config
+            # (boot_update_config.yaml) also gets its version bumped.
+            candidates = []
+            if getattr(self, "config_path", None):
+                candidates.append(self.config_path)
+            candidates.extend([
+                exe_dir / "config" / "update_config.yaml",
+                exe_dir / "update_config.yaml",
+            ])
+            seen = set()
+            for cfg_path in candidates:
+                if cfg_path in seen or not cfg_path.exists():
+                    continue
+                seen.add(cfg_path)
+                try:
+                    content = cfg_path.read_text(encoding='utf-8')
+                    new_content, n = re.subn(
+                        r'(current_version:\s*)(["\']?)([^"\'\n\r]*)(\2)',
+                        lambda m: f'{m.group(1)}"{new_version}"',
+                        content,
+                        count=1,
+                    )
+                    if n == 0:
+                        logger.warning(f"current_version line not found in {cfg_path.name}")
+                        continue
+                    cfg_path.write_text(new_content, encoding='utf-8')
+                    logger.info(f"Config version updated to {new_version} in {cfg_path.name}")
                     break
+                except Exception as e:
+                    logger.warning(f"Could not update config version in {cfg_path}: {e}")
 
             # ── Build batch script ────────────────────────────────
             update_script = self.temp_dir / "apply_update.bat"

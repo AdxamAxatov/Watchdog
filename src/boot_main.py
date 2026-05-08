@@ -10,6 +10,7 @@ from steps.rdp import run as rdp_run
 from steps.windows_focuser import run as focus_run
 from utils import load_yaml, exe_dir
 from auto_updater import check_updates
+from heartbeat import write_heartbeat
 
 
 def setup_boot_logger() -> logging.Logger:
@@ -67,6 +68,7 @@ def focus_run_with_updates(log, last_update_check):
 
     while True:
         cycle_count += 1
+        write_heartbeat("boot")
         now_str = dt.now().strftime("%Y-%m-%d %H:%M:%S")
         print(f"\n[{now_str}] Cycle #{cycle_count}")
         log.info(f"Health check cycle #{cycle_count}")
@@ -88,6 +90,9 @@ def focus_run_with_updates(log, last_update_check):
 
 
 def main():
+    # Write heartbeat immediately so a startup hang is detectable
+    write_heartbeat("boot")
+
     log = setup_boot_logger()
     log.info("=== BOOT STARTED ===")
 

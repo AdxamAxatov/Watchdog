@@ -64,43 +64,126 @@ def setup_logging():
     )
     return logging.getLogger(__name__)
 
-def close_confirmation_dialog(hwnd=None, verbose=True):
-    """
-    Close confirmation dialog by pressing Enter.
-    If hwnd is supplied, skips the press only when an entirely different app
-    has grabbed focus.  Dialogs spawned by RDPClient (same process) are
-    allowed through even if their title differs from TITLE_SUB.
-    """
-    if hwnd is not None:
-        fg = win32gui.GetForegroundWindow()
-        if fg != hwnd:
-            fg_title = win32gui.GetWindowText(fg) if fg else ""
-            # Check if foreground window belongs to the same process as hwnd
-            same_process = False
-            try:
-                _, hwnd_pid = win32process.GetWindowThreadProcessId(hwnd)
-                _, fg_pid = win32process.GetWindowThreadProcessId(fg)
-                same_process = (hwnd_pid == fg_pid)
-            except Exception:
-                pass
-            # Skip only if truly unrelated (different process AND different title)
-            if not same_process and TITLE_SUB.lower() not in fg_title.lower():
-                if verbose:
-                    print(f"   ⚠️  Focus on unrelated window '{fg_title}' — skipping Enter press")
-                return
-            if verbose and same_process and fg != hwnd:
-                print(f"   ℹ️  Dialog detected (same process): '{fg_title}'")
+GW_OWNER = 4  # GetWindow constant for owner hwnd
 
-    if verbose:
-        print("   🔘 Pressing Enter to close dialog...")
+
+def _find_rdp_dialog(parent_hwnd: int):
+    """Find a visible dialog window belonging to RDPClient.
+
+    Preference order:
+      1. A window whose GW_OWNER is parent_hwnd (true modal dialog).
+      2. A same-process visible window that's not the parent and is
+         dialog-sized (< 800x600), as a fallback.
+    Returns the hwnd or None.
+    """
+    try:
+        _, target_pid = win32process.GetWindowThreadProcessId(parent_hwnd)
+    except Exception:
+        target_pid = None
+
+    owned = []
+    same_pid_small = []
+
+    def cb(hwnd, _):
+        if hwnd == parent_hwnd or not win32gui.IsWindowVisible(hwnd):
+            return
+        try:
+            owner = win32gui.GetWindow(hwnd, GW_OWNER)
+        except Exception:
+            owner = 0
+        if owner == parent_hwnd:
+            owned.append(hwnd)
+            return
+        if target_pid is None:
+            return
+        try:
+            _, pid = win32process.GetWindowThreadProcessId(hwnd)
+            if pid != target_pid:
+                return
+            l, t, r, b = win32gui.GetWindowRect(hwnd)
+            if (r - l) < 800 and (b - t) < 600:
+                same_pid_small.append(hwnd)
+        except Exception:
+            pass
+
+    win32gui.EnumWindows(cb, None)
+    if owned:
+        return owned[0]
+    if same_pid_small:
+        return same_pid_small[0]
+    return None
+
+
+def close_confirmation_dialog(hwnd=None, verbose=True,
+                              appear_timeout_s: float = 5.0,
+                              close_timeout_s: float = 3.0):
+    """
+    Actively wait for a confirmation dialog spawned by RDPClient, dismiss it,
+    then verify it actually closed before returning.
+
+    Returns True if a dialog was detected and closed, False if no dialog
+    appeared within appear_timeout_s (in which case we do NOT press Enter
+    — stray Enters into RDPClient caused the second-click miss).
+    """
+    if hwnd is None:
+        if verbose:
+            print("   ⚠️  close_confirmation_dialog called without parent hwnd — skipping")
+        return False
 
     import pyautogui
+
+    deadline = time.time() + appear_timeout_s
+    dialog_hwnd = None
+    while time.time() < deadline:
+        dialog_hwnd = _find_rdp_dialog(hwnd)
+        if dialog_hwnd:
+            break
+        time.sleep(0.1)
+
+    if not dialog_hwnd:
+        if verbose:
+            print(f"   ℹ️  No dialog within {appear_timeout_s:.1f}s — skipping Enter")
+        return False
+
+    title = win32gui.GetWindowText(dialog_hwnd) or "(no title)"
+    if verbose:
+        print(f"   🔎 Dialog detected: '{title}' (hwnd={dialog_hwnd})")
+
+    # Foreground the dialog so Enter lands on it, then press Enter once.
+    try:
+        win32gui.SetForegroundWindow(dialog_hwnd)
+    except Exception:
+        pass
+    time.sleep(0.15)
     pyautogui.press('enter')
-    time.sleep(0.2)
-    pyautogui.press('enter')  # Press twice to be sure
+    if verbose:
+        print("   🔘 Sent Enter to dialog")
+
+    # Wait for it to actually disappear.
+    close_deadline = time.time() + close_timeout_s
+    while time.time() < close_deadline:
+        if not win32gui.IsWindow(dialog_hwnd) or not win32gui.IsWindowVisible(dialog_hwnd):
+            if verbose:
+                print("   ✅ Dialog closed")
+            return True
+        time.sleep(0.1)
+
+    # Fallback: post WM_CLOSE if Enter didn't take.
+    if verbose:
+        print("   ⚠️  Dialog persisted — sending WM_CLOSE")
+    try:
+        win32gui.PostMessage(dialog_hwnd, win32con.WM_CLOSE, 0, 0)
+    except Exception:
+        pass
+    time.sleep(0.8)
+    if not win32gui.IsWindow(dialog_hwnd) or not win32gui.IsWindowVisible(dialog_hwnd):
+        if verbose:
+            print("   ✅ Dialog closed via WM_CLOSE")
+        return True
 
     if verbose:
-        print("   ✅ Sent Enter keypress")
+        print("   ❌ Failed to close dialog")
+    return False
 
 
 def launch_rdp_with_workdir(exe_path, verbose=True):
@@ -394,101 +477,121 @@ def run(config=None, context=None):
     print("🖥️  RDPCLIENT AUTOMATION")
     print("=" * 70)
 
-    # 1) Find or launch RDPClient
-    m = find_window(TITLE_SUB, require_visible=True)
-    if not m:
-        log.info("RDPClient window not found, launching...")
-        print("⚠️  RDPClient not found, launching...")
+    # === EARLY CHECK: are the RDP session windows already open? ===
+    # If Boot is just being restarted (not a fresh boot), the 2 SinFermera
+    # sessions may already exist — in which case re-launching RDPClient and
+    # clicking the users would open duplicate sessions. Skip straight to
+    # the positioning step in that case.
+    try:
+        existing_rdp_cfg = load_yaml("config/regions.yaml").get("rdp_windows", {}) or {}
+        existing_title_search = existing_rdp_cfg.get("title_search", "SinFermera")
+    except Exception:
+        existing_title_search = "SinFermera"
+    existing_sessions = find_rdp_game_windows(existing_title_search)
+    already_open = len(existing_sessions) >= 2
+    if already_open:
+        log.info(
+            f"Found {len(existing_sessions)} '{existing_title_search}' session window(s) "
+            f"already open — skipping RDPClient launch & click sequence"
+        )
+        print(f"\n✅ {len(existing_sessions)} RDP session window(s) already open — skipping launch:")
+        for _h, _t in existing_sessions[:4]:
+            print(f"   • {_t}")
 
-        # Launch with working directory set (CRITICAL FIX!)
-        launch_rdp_with_workdir(exe_path, verbose=True)
+    if not already_open:
+        # 1) Find or launch RDPClient
+        m = find_window(TITLE_SUB, require_visible=True)
+        if not m:
+            log.info("RDPClient window not found, launching...")
+            print("⚠️  RDPClient not found, launching...")
 
-        log.info("Waiting for RDPClient window (25s timeout)")
-        print("⏳ Waiting for window (25s)...")
-        m = wait_for_window(TITLE_SUB, timeout_s=25.0, require_visible=True)
+            # Launch with working directory set (CRITICAL FIX!)
+            launch_rdp_with_workdir(exe_path, verbose=True)
 
-    if not m:
-        log.error("RDPClient window not found after launch")
-        print("❌ Window not found after launch")
-        raise RuntimeError("RDP: window not found after launch.")
+            log.info("Waiting for RDPClient window (25s timeout)")
+            print("⏳ Waiting for window (25s)...")
+            m = wait_for_window(TITLE_SUB, timeout_s=25.0, require_visible=True)
 
-    log.info(f"Found RDPClient Window (HWND: {m.hwnd}, Title: {m.title})")
-    print(f"\n✅ RDPClient window found")
-    print(f"   HWND:  {m.hwnd}")
-    print(f"   Title: {m.title}")
+        if not m:
+            log.error("RDPClient window not found after launch")
+            print("❌ Window not found after launch")
+            raise RuntimeError("RDP: window not found after launch.")
 
-    # 2) Wait for UI and user list to fully load
-    log.info(f"Waiting {ui_wait_s}s for UI and user list to load")
-    print(f"\n⏳ Waiting {ui_wait_s}s for UI...")
-    time.sleep(ui_wait_s)
+        log.info(f"Found RDPClient Window (HWND: {m.hwnd}, Title: {m.title})")
+        print(f"\n✅ RDPClient window found")
+        print(f"   HWND:  {m.hwnd}")
+        print(f"   Title: {m.title}")
 
-    # 3) Force focus before first click
-    log.info("Focusing RDPClient window")
-    print("\n🎯 Focusing RDPClient...")
-    if not force_foreground(m.hwnd):
-        log.error("Failed to focus RDPClient")
-        print("❌ Failed to focus RDPClient")
-        raise RuntimeError("RDP: could not foreground (safety stop).")
+        # 2) Wait for UI and user list to fully load
+        log.info(f"Waiting {ui_wait_s}s for UI and user list to load")
+        print(f"\n⏳ Waiting {ui_wait_s}s for UI...")
+        time.sleep(ui_wait_s)
 
-    assert_foreground(m.hwnd)
-    log.info("Window focused")
-    print("✅ Focused")
-    
-    time.sleep(0.3)
+        # 3) Force focus before first click
+        log.info("Focusing RDPClient window")
+        print("\n🎯 Focusing RDPClient...")
+        if not force_foreground(m.hwnd):
+            log.error("Failed to focus RDPClient")
+            print("❌ Failed to focus RDPClient")
+            raise RuntimeError("RDP: could not foreground (safety stop).")
 
-    # 4) Double-click User1
-    x1, y1 = pct_to_screen_xy(m.hwnd, float(user1["x"]), float(user1["y"]))
-    
-    log.info(f"Double-clicking User1 at ({user1['x']:.4f}, {user1['y']:.4f}) → screen ({x1}, {y1})")
-    print(f"\n🖱️  Double-clicking User1  ({user1['x']:.4f}, {user1['y']:.4f}) → ({x1}, {y1})")
+        assert_foreground(m.hwnd)
+        log.info("Window focused")
+        print("✅ Focused")
 
-    safe_double_click(x1, y1)
-    log.info("User1 double-clicked")
-    print("✅ User1 clicked")
+        time.sleep(0.3)
 
-    # 4a) Close confirmation dialog
-    log.info(f"Waiting {dialog_wait_s}s for User1 confirmation dialog")
-    print(f"⏳ Waiting {dialog_wait_s}s for dialog...")
-    time.sleep(dialog_wait_s)
-    close_confirmation_dialog(hwnd=m.hwnd, verbose=True)
-    time.sleep(0.5)
+        # 4) Double-click User1
+        x1, y1 = pct_to_screen_xy(m.hwnd, float(user1["x"]), float(user1["y"]))
 
-    # 5) Refocus RDPClient for second click
-    log.info("Re-focusing RDPClient window")
-    print("\n🎯 Re-focusing RDPClient...")
-    if not force_foreground(m.hwnd):
-        log.error("Failed to re-focus RDPClient after User1")
-        print("❌ Re-focus failed after User1")
-        raise RuntimeError("RDP: could not refocus after user1 (safety stop).")
+        log.info(f"Double-clicking User1 at ({user1['x']:.4f}, {user1['y']:.4f}) → screen ({x1}, {y1})")
+        print(f"\n🖱️  Double-clicking User1  ({user1['x']:.4f}, {user1['y']:.4f}) → ({x1}, {y1})")
 
-    assert_foreground(m.hwnd)
-    log.info("Window re-focused")
-    print("✅ Re-focused")
-    
-    time.sleep(0.3)
+        safe_double_click(x1, y1)
+        log.info("User1 double-clicked")
+        print("✅ User1 clicked")
 
-    # 6) Double-click User2
-    x2, y2 = pct_to_screen_xy(m.hwnd, float(user2["x"]), float(user2["y"]))
-    
-    log.info(f"Double-clicking User2 at ({user2['x']:.4f}, {user2['y']:.4f}) → screen ({x2}, {y2})")
-    print(f"\n🖱️  Double-clicking User2  ({user2['x']:.4f}, {user2['y']:.4f}) → ({x2}, {y2})")
+        # 4a) Close confirmation dialog (poller waits up to 5s for it to appear)
+        log.info("Waiting for User1 confirmation dialog")
+        print("⏳ Waiting for dialog to appear...")
+        close_confirmation_dialog(hwnd=m.hwnd, verbose=True)
+        time.sleep(0.5)
 
-    safe_double_click(x2, y2)
-    log.info("User2 double-clicked")
-    print("✅ User2 clicked")
+        # 5) Refocus RDPClient for second click
+        log.info("Re-focusing RDPClient window")
+        print("\n🎯 Re-focusing RDPClient...")
+        if not force_foreground(m.hwnd):
+            log.error("Failed to re-focus RDPClient after User1")
+            print("❌ Re-focus failed after User1")
+            raise RuntimeError("RDP: could not refocus after user1 (safety stop).")
 
-    # 6a) Close confirmation dialog
-    log.info(f"Waiting {dialog_wait_s}s for User2 confirmation dialog")
-    print(f"⏳ Waiting {dialog_wait_s}s for dialog...")
-    time.sleep(dialog_wait_s)
-    close_confirmation_dialog(hwnd=m.hwnd, verbose=True)
-    time.sleep(0.5)
+        assert_foreground(m.hwnd)
+        log.info("Window re-focused")
+        print("✅ Re-focused")
 
-    log.info("RDPCLIENT AUTOMATION COMPLETE - Both RDP sessions opening")
-    print("\n" + "=" * 70)
-    print("✅ RDPCLIENT AUTOMATION COMPLETE")
-    print("=" * 70)
-    print("Both RDP sessions should now be opening\n")
+        time.sleep(0.3)
+
+        # 6) Double-click User2
+        x2, y2 = pct_to_screen_xy(m.hwnd, float(user2["x"]), float(user2["y"]))
+
+        log.info(f"Double-clicking User2 at ({user2['x']:.4f}, {user2['y']:.4f}) → screen ({x2}, {y2})")
+        print(f"\n🖱️  Double-clicking User2  ({user2['x']:.4f}, {user2['y']:.4f}) → ({x2}, {y2})")
+
+        safe_double_click(x2, y2)
+        log.info("User2 double-clicked")
+        print("✅ User2 clicked")
+
+        # 6a) Close confirmation dialog (poller waits up to 5s for it to appear)
+        log.info("Waiting for User2 confirmation dialog")
+        print("⏳ Waiting for dialog to appear...")
+        close_confirmation_dialog(hwnd=m.hwnd, verbose=True)
+        time.sleep(0.5)
+
+        log.info("RDPCLIENT AUTOMATION COMPLETE - Both RDP sessions opening")
+        print("\n" + "=" * 70)
+        print("✅ RDPCLIENT AUTOMATION COMPLETE")
+        print("=" * 70)
+        print("Both RDP sessions should now be opening\n")
 
     # ========================================================================
     # NEW: Position RDP game windows (added without changing above logic)
