@@ -109,15 +109,19 @@ def main():
     paths = cfg.get("paths", {})
 
     # Step 1: MemReduct
+    # MemReduct is a nice-to-have memory cleanup, NOT mission-critical.
+    # If it fails (most commonly because it's set to "run as administrator"
+    # and UIPI blocks our click from a Medium-integrity Boot.exe), we log
+    # the traceback and continue. RDP launch and the focus loop still run.
     try:
         log.info("Step 1: MemReduct")
         print("1️⃣  Starting MemReduct...")
         mem_run({"exe_path": paths["memreduct_exe"][0]})
         print("   ✅ MemReduct complete\n")
         log.info("MemReduct done")
-    except Exception:
-        log.exception("MemReduct step failed")
-        raise
+    except Exception as e:
+        log.exception("MemReduct step failed — continuing without memory cleanup")
+        print(f"   ⚠️  MemReduct failed: {e} — continuing\n")
 
     write_heartbeat("boot")  # post-MemReduct progress beat
     time.sleep(2)

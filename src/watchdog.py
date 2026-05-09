@@ -224,6 +224,25 @@ def run_panel_first_run_if_needed(hwnd: int, regions: dict, log=None, force: boo
     if not clicks:
         return True  # No clicks needed = success
 
+    # Defense-in-depth: never fire first-run clicks if ANY CS2 is already
+    # running. The clicks trigger panel-driven CS2 launches; firing them on
+    # top of running instances causes account conflicts and duplicate
+    # launches. Callers must ensure CS2 is fully killed before calling.
+    try:
+        cs2_running = count_cs2_instances()
+        if cs2_running > 0:
+            if log:
+                log.warning(
+                    "Skipping first-run clicks: %d CS2 instance(s) already running — panel is operational",
+                    cs2_running,
+                )
+            print(f"⏭️  Skipping first-run clicks: {cs2_running} CS2 already running")
+            return True  # Treat as success — panel is operational, no work needed
+    except Exception as e:
+        if log:
+            log.warning("CS2 count check failed in first-run gate: %s — proceeding cautiously", e)
+        # Fall through to normal first-run flow if we can't read process table.
+
     ensure_normalized(hwnd)
 
     # Wait AFTER launch so UI has time to show onboarding
