@@ -75,6 +75,61 @@ def _dismiss_crash_dialog(log=None):
                 log.warning(f"Failed to dismiss dialog '{title}': {e}")
 
 
+def probe_window_with_click(hwnd, title, log=None, settle_seconds: float = 2.5):
+    """Interactive probe — surfaces "stuck RDP" cases that is_window_responding
+    misses. The local RDP client (mstsc.exe) keeps pumping messages even when
+    the underlying remote session is frozen, so the cheap API check returns
+    True for a window that's actually dead.
+
+    We bring the window forward and click its title bar. That routes through
+    the OS input system (not just our message pump), which forces Windows'
+    own hung-app detector to evaluate the window more thoroughly. After a
+    couple seconds, an actually-stuck window has its "Not Responding" ghost
+    overlay visible, and `is_window_responding` returns False.
+
+    The click lands on the title bar (left edge, on the title text), NOT on
+    the remote desktop content, so it doesn't disturb anything inside the
+    RDP session — title-bar clicks are handled by the local RDP client app.
+
+    Returns True if the window is still responsive after the probe,
+    False if it revealed itself as stuck.
+    """
+    try:
+        # Bring window to front so the click lands on this window, not
+        # whatever happens to be at those screen coords.
+        if not focus_window_aggressive(hwnd, title, log):
+            # Can't focus — could already be stuck, but we don't want a
+            # focus failure alone to be enough to close the window. Other
+            # signals (is_window_responding, ghost overlay) handle that.
+            return True
+
+        rect = win32gui.GetWindowRect(hwnd)
+        # Pick a point on the title bar text: ~80px right of the left edge
+        # (past the system menu icon), ~8px down from the top (well inside
+        # the title bar, away from the resize border). Avoids the minimize/
+        # maximize/close buttons on the right.
+        click_x = rect[0] + 80
+        click_y = rect[1] + 8
+
+        pyautogui.click(click_x, click_y)
+        if log:
+            log.info(f"Probe click on title bar of {title} at ({click_x}, {click_y})")
+
+        # Give Windows time to update its responsiveness state. The hung-app
+        # detector typically kicks in within ~2 seconds of a non-responsive
+        # window receiving input.
+        time.sleep(settle_seconds)
+
+        responsive = is_window_responding(hwnd)
+        if not responsive and log:
+            log.warning(f"Window revealed as STUCK after probe click: {title}")
+        return responsive
+    except Exception as e:
+        if log:
+            log.warning(f"probe_window_with_click failed for {title}: {e}")
+        return True  # On error, fall through — don't false-positive on bugs
+
+
 def check_and_recover_window(hwnd, title, log=None):
     """
     Check if a window is responding. If hung, close it and dismiss crash dialogs.
@@ -89,13 +144,21 @@ def check_and_recover_window(hwnd, title, log=None):
             log.warning(f"Window no longer exists: {title}")
         return "gone"
 
-    if is_window_responding(hwnd):
+    # Layer 1: cheap API check — catches "hard" hangs where the window
+    # is already showing the ghost overlay or has stopped pumping messages.
+    if not is_window_responding(hwnd):
+        hang_reason = "API not responding"
+    # Layer 2: interactive probe — RDP windows can stay API-responsive even
+    # when the underlying remote session is frozen. The click forces a
+    # deeper hung-app check that surfaces this case.
+    elif not probe_window_with_click(hwnd, title, log=log):
+        hang_reason = "stuck after probe click (RDP session likely frozen)"
+    else:
         return "responding"
 
-    # Window is hung — not responding
     if log:
-        log.warning(f"Window NOT RESPONDING: {title} (hwnd={hwnd})")
-    print(f"   !! NOT RESPONDING: {title}")
+        log.warning(f"Window HUNG ({hang_reason}): {title} (hwnd={hwnd})")
+    print(f"   !! HUNG ({hang_reason}): {title}")
 
     # Capture diagnostics: screenshot + all visible window titles
     try:

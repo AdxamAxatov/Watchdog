@@ -1,5 +1,16 @@
 # Plan — AI-driven panel decisions for Watchdog
 
+> **Status: DEFERRED INDEFINITELY (as of 2026-05-09).**
+> The user no longer needs AI judgment in the panel-decision loop. The
+> rule-based Watchdog with this session's hardening is sufficient.
+>
+> The original design below is kept for historical reference. Don't
+> implement it unless the user explicitly asks.
+>
+> The "Session of 2026-05-09" section near the bottom of this file is
+> still useful — it's the running state snapshot of what landed in
+> the Watchdog/Boot/CS2Validator/lockdown rollout.
+
 ## Context
 
 The current `Watchdog.exe` decides what to do with the FSM panel via brittle rule pipelines: Tesseract OCRs the logbox, regex `ENTRY_RE` parses `HH:MM | message`, and a handful of hard-coded thresholds (`general_timeout_minutes`, "cannot add" substring match, `latest_msg_is_warm`, `is_launch_in_progress`'s 10-min window) decide whether to click the recovery button, kill CS2, restart explorer, or run first-run clicks. Each of these rules has been a source of incidents — OCR misreads, edge-case messages the regex doesn't match, or new panel states the rules weren't written for. The user wants AI judgment to replace these interpretive decisions while leaving cheap operational plumbing (heartbeat, auto-update, window-find, normalization, CS2 process count) on the existing 3-min loop.
@@ -212,31 +223,34 @@ The user has more features to add to this plan before execution begins. Drop the
 
 ---
 
-## Deferred — CS2 file validator merge (origin/twin)
+## Session of 2026-05-09 — what landed (so a fresh session can pick up)
 
-A CS2 file validator was implemented on the `twin` branch by the user (commit `0566bc3 Add daily CS2 file validation`). It adds `src/steps/cs2_validate.py` (~106 lines) and a 12-line wiring change in `src/watchdog.py`.
+### Committed (in git, on `main`)
+- Heartbeat overhaul: `sleep_with_heartbeat()` helper in `heartbeat.py`; used in `boot_main.py` (focus-loop sleep + post-MemReduct + post-RDP beats) and `watchdog.py` (all 4 `time.sleep(poll)` sites). Cadence: every ~30s instead of every 3-15 min.
+- CS2 fixer rewrite: `cs2_youngest_age_seconds()` replaces OCR-based `is_launch_in_progress`; CS2-count interval 5min→2min; `force_foreground` in the kill-CS2 click path; pause-flag check at top of `check_cs2_instance_count`.
+- First-run defensive gate: `run_panel_first_run_if_needed` now skips when `count_cs2_instances() > 0`. Returns True (treats as success).
+- PID dict fix: `first_run_completed_pids` was `set` with random-trim bug; now `dict` (insertion-ordered) so newest 10 PIDs actually survive trim.
+- `capture_logbox_client` no longer pre-focuses (eliminated per-poll spam warning).
+- `force_foreground` failure paths now log the blocker window's title.
+- Boot resilience: MemReduct exception no longer crashes Boot. Logs traceback, prints warning, falls through to RDP launch + focus loop.
+- CS2Validator: NEW standalone exe (`cs2_validator_main.py` + `cs2_validate.py`) with cross-user pause flag at `C:\ProgramData\Watchdog\cs2_validation_in_progress.flag`. See [[project_cs2_validator_design]].
+- RDP click-probe detection: `windows_focuser.py:probe_window_with_click` — focus + title-bar click + 2.5s wait + re-check `is_window_responding`. Catches RDP windows that look API-responsive but are actually stuck.
 
-**Decision:** merge deferred — pick this back up later.
+### Deploy artifacts (gitignored in `WatchdogDeploy/Boot/`)
+- `health_check.bat` — thresholds tightened to 3min/5min; 10s tasklist double-check; cold-start grace exception; BOOT_USER/BOOT_ROOT can be split per-PC for username/folder mismatches (Farmer11 needs this — see [[project_pc_specific_overrides]]).
+- `windows_lockdown.ps1` — copied from `origin/windows-lockdown` with two fixes applied: removed redundant Edge-task-disable loop, and wrapped `.Count` accesses in `@(...)` to work under StrictMode. Steady-state verdict on this rig is PARTIAL_FAIL 13/16, that's expected.
 
-**Confirmed design intent:** both RDP users share the main user's Steam install, so a single validation pass covers both sessions. The shared marker file (`logs/cs2_validate_last_run.txt`, no per-user suffix) is intentional — first session to validate writes the marker, the other session sees it fresh and skips.
+### Deployed status
+- Farmer11/Farmer12 PC: new builds confirmed installed (verified via log strings only present in new build, e.g. "First-run pending for PID"). health_check.bat patched for the Farmer11/Farmer12 username/folder mismatch. windows_lockdown.ps1 installed.
+- Farmer10 PC: windows_lockdown.ps1 installed.
+- Other PCs: pending the user's rollout.
 
-**Known issues to resolve before merging to `main`:**
+### Outstanding work
+- Drop-stats automation on `origin/twin` (commit `ea953a5`) — `drop-stats-automation/` folder, 5 files, 311 lines. Not yet reviewed.
+- AI integration plan — still in this document above. Not implemented.
+- From `Fix plan.txt`: Telegram alerter (waits for AI plan), account sort by map rank (waits for AI/Steam-API spike).
 
-1. **Timing arithmetic in `watchdog.py` wiring is off-by-300s.**
-   `last_cs2_check_ts = time.time() + (15 * 60) - 300` defers the next CS2 instance check by 10 min, but the comment says 15. Either drop the `- 300` to defer the full 15 min, or rewrite the comment to reflect the actual 10-min defer.
-
-2. **Tiny race on simultaneous trigger from both sessions.**
-   Both Watchdogs call `cs2_validate_run()` every loop. There's a millisecond-wide window where both could see "no marker" and fire `start steam://validate/730` together. Steam dedupes internally so it's harmless, but the validator should **write the marker BEFORE launching Steam** (not after) to close the race tidily. One-line reorder in `cs2_validate.py`.
-
-3. **Already mitigated by today's `cs2_youngest_age_seconds` change** (no fix needed):
-   When Steam starts validating it closes CS2. The new process-age skip in `check_cs2_instance_count` correctly notices "no cs2.exe in this session, youngest_age=None" → next loop tries to relaunch via the panel once validation finishes. No double-kill risk.
-
-**Polish items (defer further, harmless):**
-- `logging.basicConfig()` at module level in `cs2_validate.py` — only matters if imported from a context with no logger; benign in practice.
-- 24h interval is hardcoded — fine for v1, can be moved to `config/app.yaml` later.
-- The redundant `sys.path` dance vs. `from utils import exe_dir` — works but ugly.
-
-**To resume:**
-1. `git fetch origin twin && git checkout origin/twin -- src/steps/cs2_validate.py src/watchdog.py`
-2. Apply fixes #1 (timing) and #2 (marker-before-launch order)
-3. Merge to `main`
+### Files that needed manual edits per-PC during deploy
+- `health_check.bat` lines 13-22 (6 placeholders) — see [[project_pc_specific_overrides]] for the Farmer11 split (lines 21 + 29) edge case.
+- `windows_lockdown.ps1` — zero placeholders, drop-and-go.
+- CS2Validator Task Scheduler entry — manual GUI registration, "Run as: <STEAM_USER>" not main user.
