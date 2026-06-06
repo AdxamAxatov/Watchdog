@@ -1,0 +1,27 @@
+# drop_stats.yaml — runtime config for DropStatsRunner.exe
+#
+# The four UI click coordinates live in regions.yaml under `drop_stats:`
+# (grouped with the other per-PC pixel-percent coords). Only behavioral
+# config + Task Scheduler task names live here.
+
+# Task Scheduler task names ------------------------------------------------
+# The general health checker task (the one scheduled every ~5 min that
+# monitors Watchdog/Boot heartbeats). We disable it before killing
+# Watchdog so it can't immediately relaunch what we kill.
+health_check_task: "CHANGE_ME_HEALTH_CHECK_TASK"
+
+# Our own safety-net task (drop_stats_health_check.bat). Scheduled every
+# 5 min but normally disabled. We enable+trigger it at start, disable it
+# on the way out. If we crash mid-flow, that task does the cleanup for us.
+self_task: "CHANGE_ME_DROP_STATS_HC_TASK"
+
+# Timing ------------------------------------------------------------------
+post_kill_wait_seconds: 8           # Wait after kill_all_cs2 click before next click
+click_delay_seconds: 1.5            # Pause between drop-stats UI clicks
+logbox_watch_timeout_minutes: 10    # Max wait for completion phrase
+logbox_poll_seconds: 10             # OCR poll cadence during the watch
+
+# Substring searched for in the logbox OCR (case-insensitive). When it
+# appears, drop-stats is considered complete and the script restores the
+# general health checker and exits.
+completion_phrase: "Case report sent"

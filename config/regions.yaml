@@ -56,3 +56,24 @@ rdp_windows:
   # Window search term
   title_search: "SinFermera"
   focus_interval_minutes: 15
+
+# Drop-stats automation (DropStatsRunner.exe). All four are PLACEHOLDERS —
+# calibrate manually per-PC. Same percentage-of-client-area convention as
+# button_point_pct / kill_all_cs2_point_pct above.
+drop_stats:
+  # The "Drop Stats" entry on the panel home screen.
+  drop_stats_button_pct:
+    x: 0.0
+    y: 0.0
+  # The closed week-picker dropdown that opens the option list.
+  week_dropdown_pct:
+    x: 0.0
+    y: 0.0
+  # The "2. Week [...]" entry inside the opened dropdown (previous week).
+  previous_week_option_pct:
+    x: 0.0
+    y: 0.0
+  # The green "Generate report" button under the dropdown.
+  generate_report_button_pct:
+    x: 0.0
+    y: 0.0
