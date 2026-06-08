@@ -366,6 +366,251 @@ def check_and_focus_windows(title_search="SinFermera", log=None):
     return focused_count, closed_count
 
 
+# ============================================================================
+# Black-screen / hung RDP recovery (added)
+#
+# The owner's RDP session windows sometimes go fully BLACK while the local RDP
+# client keeps pumping messages — so is_window_responding() returns True and
+# the old hung-detection path never fires. We add a pixel-brightness check on
+# each window's client area and, on each 30-min tick, close-and-reopen the
+# session window(s) (the programmatic equivalent of pressing X). The RDP client
+# auto-reopens them; only if NO session reappears AND the host RDP process is
+# dead do we relaunch RDPClient.
+#
+# CS2 recovery is intentionally NOT touched here — Watchdog.exe owns it.
+# ============================================================================
+
+# Per-window short history of "was the last sample black?" so we only act after
+# `blackness_consecutive` black samples in a row (avoids one-off capture glitches
+# / transient loading frames). Keyed by hwnd.
+_BLACK_SAMPLE_HISTORY = {}
+
+
+def _sample_window_brightness(hwnd, log=None):
+    """Return mean brightness (0-255) of the window's client area, or None.
+
+    Self-contained BitBlt capture (mirrors watchdog.capture_window_region_api)
+    so this module gains no dependency on watchdog.py's heavy import chain.
+    Works on unfocused / partially covered windows. Returns None on any
+    failure so the caller can fall back to the responsiveness check alone.
+    """
+    try:
+        import win32ui
+        import numpy as np
+
+        l, t, r, b = win32gui.GetClientRect(hwnd)
+        w, h = r - l, b - t
+        if w <= 0 or h <= 0:
+            return None
+
+        hwndDC = win32gui.GetDC(hwnd)
+        mfcDC = win32ui.CreateDCFromHandle(hwndDC)
+        saveDC = mfcDC.CreateCompatibleDC()
+        saveBitMap = win32ui.CreateBitmap()
+        saveBitMap.CreateCompatibleBitmap(mfcDC, w, h)
+        saveDC.SelectObject(saveBitMap)
+        saveDC.BitBlt((0, 0), (w, h), mfcDC, (0, 0), win32con.SRCCOPY)
+
+        bmpstr = saveBitMap.GetBitmapBits(True)
+        img = np.frombuffer(bmpstr, dtype=np.uint8)
+        img.shape = (h, w, 4)  # BGRA
+
+        # Mean over the BGR channels only (ignore alpha).
+        mean_brightness = float(img[:, :, :3].mean())
+
+        win32gui.DeleteObject(saveBitMap.GetHandle())
+        saveDC.DeleteDC()
+        mfcDC.DeleteDC()
+        win32gui.ReleaseDC(hwnd, hwndDC)
+
+        return mean_brightness
+    except Exception as e:
+        if log:
+            log.warning(f"Brightness sample failed (hwnd={hwnd}): {e}")
+        return None
+
+
+def _host_rdp_process_running(cfg, log=None):
+    """True if either the FreeRDP renderer (wfreerdp.exe) or RDPClient.exe is
+    running. Used to decide whether we must relaunch the host RDP stack after
+    closing all session windows. Self-contained tasklist check (mirrors
+    watchdog.is_process_running) — no dependency on watchdog.py.
+    """
+    paths = (cfg or {}).get("paths", {}) or {}
+
+    host_names = []
+    wfreerdp_list = paths.get("wfreerdp_exe") or []
+    if wfreerdp_list:
+        host_names.append(os.path.basename(str(wfreerdp_list[0])))
+    else:
+        host_names.append("wfreerdp.exe")  # sensible default even if unconfigured
+    host_names.append("RDPClient.exe")
+
+    for image_name in host_names:
+        if not image_name:
+            continue
+        try:
+            out = subprocess.check_output(
+                ["tasklist", "/FO", "CSV", "/NH", "/FI", f"IMAGENAME eq {image_name}"],
+                text=True, errors="ignore", timeout=15,
+            )
+            if "No tasks are running" in out:
+                continue
+            if image_name.lower() in out.lower():
+                if log:
+                    log.info(f"Host RDP process alive: {image_name}")
+                return True
+        except Exception as e:
+            if log:
+                log.warning(f"tasklist check failed for {image_name}: {e}")
+    return False
+
+
+def _is_black_or_hung(hwnd, title, threshold, needed_consecutive, log=None):
+    """Decide if a window should be treated as black/hung.
+
+    True when is_window_responding()==False, OR mean brightness has stayed
+    below `threshold` for `needed_consecutive` samples in a row.
+    """
+    # Hung path first — cheap and unambiguous.
+    if not is_window_responding(hwnd):
+        if log:
+            log.warning(f"Window not responding (hung): {title}")
+        _BLACK_SAMPLE_HISTORY.pop(hwnd, None)
+        return True
+
+    brightness = _sample_window_brightness(hwnd, log=log)
+    if brightness is None:
+        # Capture failed — don't treat as black on a capture bug; reset streak.
+        _BLACK_SAMPLE_HISTORY.pop(hwnd, None)
+        return False
+
+    is_black_now = brightness < threshold
+    streak = _BLACK_SAMPLE_HISTORY.get(hwnd, 0)
+    streak = streak + 1 if is_black_now else 0
+    _BLACK_SAMPLE_HISTORY[hwnd] = streak
+
+    if log:
+        log.info(
+            f"Brightness {brightness:.1f} (thr {threshold}) "
+            f"black_now={is_black_now} streak={streak}/{needed_consecutive}: {title}"
+        )
+
+    return is_black_now and streak >= needed_consecutive
+
+
+def _close_window(hwnd, title, log=None):
+    """Close one RDP session window via WM_CLOSE (the X-button equivalent),
+    so the RDP client auto-reopens it. Reuses the existing close primitive.
+    """
+    close_hung_window(hwnd)  # posts WM_CLOSE (non-blocking)
+    _BLACK_SAMPLE_HISTORY.pop(hwnd, None)
+    if log:
+        log.info(f"Sent WM_CLOSE to RDP session window: {title}")
+    print(f"   -> Closed RDP window (X): {title}")
+
+
+def cycle_or_recover_rdp_windows(title_search="SinFermera", log=None):
+    """Owner-approved 30-min RDP maintenance tick.
+
+    Each tick:
+      (a) sample every SinFermera RDP window -> black (brightness streak) or
+          hung (is_window_responding) windows are flagged;
+      (b) close flagged windows via WM_CLOSE (X) so the RDP client reopens them;
+      (c) if unconditional_cycle is on and nothing was flagged, still close the
+          healthy windows (owner's literal "otherwise close every 30 min");
+      (d) wait reopen_wait_seconds, re-enumerate;
+      (e) if NO session reappeared AND neither wfreerdp.exe nor RDPClient.exe is
+          running, relaunch the host stack via steps.rdp.run().
+
+    CS2 is left entirely to Watchdog.exe. No CS2 actions here, so no lock needed.
+
+    Returns (closed_count, relaunched_host: bool).
+    """
+    cfg = load_yaml("config/regions.yaml")
+    rdp_cfg = cfg.get("rdp_windows", {}) or {}
+    threshold = float(rdp_cfg.get("blackness_threshold", 12))
+    needed_consecutive = int(rdp_cfg.get("blackness_consecutive", 2))
+    reopen_wait = float(rdp_cfg.get("reopen_wait_seconds", 12))
+    unconditional = bool(rdp_cfg.get("unconditional_cycle", True))
+
+    windows = find_rdp_windows(title_search)[:2]  # only the 2 sessions
+    if not windows:
+        if log:
+            log.warning("No SinFermera windows found at tick start")
+        print("!!  No SinFermera windows found")
+
+    closed_count = 0
+    relaunched_host = False
+
+    # (a)+(b) close black/hung windows
+    for hwnd, title in windows:
+        if not win32gui.IsWindow(hwnd):
+            continue
+        if _is_black_or_hung(hwnd, title, threshold, needed_consecutive, log=log):
+            print(f"   !! BLACK/HUNG: {title}")
+            _close_window(hwnd, title, log=log)
+            closed_count += 1
+
+    # (c) healthy tick + unconditional cycle -> still close-and-reopen
+    if closed_count == 0 and windows and unconditional:
+        if log:
+            log.info("Healthy tick — performing unconditional close-and-reopen cycle")
+        print("   Healthy — unconditional 30-min close-and-reopen cycle")
+        for hwnd, title in windows:
+            if win32gui.IsWindow(hwnd):
+                _close_window(hwnd, title, log=log)
+                closed_count += 1
+    elif closed_count == 0 and windows and not unconditional:
+        if log:
+            log.info("Healthy tick — all RDP windows OK (unconditional cycle disabled)")
+        print("   Healthy — all RDP windows OK")
+
+    if closed_count == 0 and not windows:
+        # Nothing open at all — fall through to the relaunch check below.
+        pass
+
+    # (d) wait, then re-enumerate
+    if closed_count > 0 or not windows:
+        if log:
+            log.info(f"Waiting {reopen_wait:.0f}s for RDP window(s) to reopen...")
+        print(f"   Waiting {reopen_wait:.0f}s for RDP to reopen...")
+        time.sleep(reopen_wait)
+
+    reappeared = find_rdp_windows(title_search)
+
+    # (e) relaunch host only if nothing reappeared AND host process is dead
+    if not reappeared:
+        if _host_rdp_process_running(cfg, log=log):
+            if log:
+                log.info("No session window yet but host RDP process is alive — "
+                         "leaving it to auto-reopen, not relaunching")
+            print("   No window yet, but host RDP alive — waiting for auto-reopen")
+        else:
+            if log:
+                log.warning("No RDP session window and host RDP process DEAD — "
+                            "relaunching via steps.rdp.run()")
+            print("   !! Host RDP dead — relaunching RDPClient")
+            try:
+                from steps.rdp import run as rdp_run
+                rdp_run()
+                relaunched_host = True
+                if log:
+                    log.info("Relaunched host RDP stack")
+            except Exception as e:
+                if log:
+                    log.exception("Failed to relaunch host RDP stack")
+                print(f"   !! Relaunch failed: {e}")
+    else:
+        if log:
+            log.info(f"RDP session window(s) present after cycle: {len(reappeared)}")
+        print(f"   OK {len(reappeared)} RDP window(s) present")
+
+    if log:
+        log.info(f"RDP tick result: closed={closed_count}, relaunched_host={relaunched_host}")
+    return closed_count, relaunched_host
+
+
 def run(config=None, context=None):
     """
     Run continuous window health check and focus maintenance.
