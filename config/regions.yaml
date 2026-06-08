@@ -39,6 +39,16 @@ paths:
   rdpclient_exe:
     - "C:/Users/Farmer7/Downloads/RDPClient/RDPClient/RDPClient.exe"
 
+  # FreeRDP renderer that RDPClient actually spawns to draw each session.
+  # When a session window goes black, this is the process that's stuck/dead.
+  # The black-screen recovery uses this to decide whether the host RDP stack
+  # is still alive (so it can just close+reopen the window) or fully dead
+  # (so it must relaunch RDPClient). Only the BASENAME (wfreerdp.exe) is used
+  # for the running-process check; the full path is informational / future use.
+  # NOTE: verify this path matches the actual install on each PC.
+  wfreerdp_exe:
+    - "C:/Users/Farmer7/Downloads/RDPClient/RDPClient/wfreerdp.exe"
+
 rdp:
   user1_point_pct:
     x: 0.1902
@@ -55,7 +65,21 @@ rdp_windows:
   height: 939  # Height in pixels
   # Window search term
   title_search: "SinFermera"
-  focus_interval_minutes: 15
+  focus_interval_minutes: 30
+
+  # --- Black-screen / hung RDP recovery (added) ---
+  # Every tick the focuser samples each SinFermera window's client area.
+  # A window is treated as BLACK when its mean pixel brightness (0-255) stays
+  # below `blackness_threshold` for `blackness_consecutive` samples in a row,
+  # OR when is_window_responding() reports it hung.
+  blackness_threshold: 12        # mean brightness below this = "black"
+  blackness_consecutive: 2       # consecutive black samples required to act
+  reopen_wait_seconds: 12        # wait after closing before re-enumerating
+
+  # Owner's literal ask: "otherwise just close the windows every 30 min".
+  # When true, a healthy tick still closes each session window (RDP client
+  # auto-reopens it). Set false to only close BLACK/HUNG windows.
+  unconditional_cycle: true
 
 # Drop-stats automation (DropStatsRunner.exe). All four are PLACEHOLDERS —
 # calibrate manually per-PC. Same percentage-of-client-area convention as

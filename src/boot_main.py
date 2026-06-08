@@ -52,18 +52,22 @@ def check_boot_update(log):
 
 
 def focus_run_with_updates(log, last_update_check):
-    """Wrap focus_run's loop with hourly Boot.exe update checks."""
+    """Wrap focus_run's loop with hourly Boot.exe update checks.
+
+    Each tick runs the RDP black-screen / hung recovery + (optional)
+    unconditional close-and-reopen cycle. CS2 recovery is left to Watchdog.exe.
+    """
     from utils import load_yaml
-    from steps.windows_focuser import check_and_focus_windows
+    from steps.windows_focuser import cycle_or_recover_rdp_windows
     from datetime import datetime as dt
 
     cfg = load_yaml("config/regions.yaml")
     rdp_config = cfg.get("rdp_windows", {})
     title_search = rdp_config.get("title_search", "SinFermera")
-    focus_interval_minutes = rdp_config.get("focus_interval_minutes", 15)
+    focus_interval_minutes = rdp_config.get("focus_interval_minutes", 30)
     focus_interval_seconds = focus_interval_minutes * 60
 
-    log.info("Focus maintenance with update checks started (every %d min)", focus_interval_minutes)
+    log.info("RDP maintenance with update checks started (every %d min)", focus_interval_minutes)
     cycle_count = 0
 
     while True:
@@ -71,15 +75,19 @@ def focus_run_with_updates(log, last_update_check):
         write_heartbeat("boot")
         now_str = dt.now().strftime("%Y-%m-%d %H:%M:%S")
         print(f"\n[{now_str}] Cycle #{cycle_count}")
-        log.info(f"Health check cycle #{cycle_count}")
+        log.info(f"RDP maintenance cycle #{cycle_count}")
 
-        focused, closed = check_and_focus_windows(title_search, log)
-        if closed > 0:
-            print(f"!! Closed {closed} hung window(s)")
-        if focused > 0:
-            print(f"OK Focused {focused} window(s)")
-        if focused == 0 and closed == 0:
-            print(f"!! No windows to focus")
+        try:
+            closed, relaunched = cycle_or_recover_rdp_windows(title_search, log)
+            if closed > 0:
+                print(f"!! Closed {closed} RDP window(s) this tick")
+            if relaunched:
+                print("!! Relaunched host RDP stack")
+            if closed == 0 and not relaunched:
+                print("OK RDP healthy — nothing to do")
+        except Exception:
+            # A bad tick must never kill the maintenance loop.
+            log.exception("RDP maintenance tick failed — continuing")
 
         # Hourly Boot.exe update check
         if time.time() - last_update_check >= UPDATE_CHECK_INTERVAL:
