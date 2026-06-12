@@ -1,0 +1,47 @@
+# config/windowchecker_update_config.yaml
+# Auto-updater configuration for WindowChecker.exe
+
+# Enable/disable auto-updates
+enabled: true
+
+# GitHub repository info (same repo, WindowChecker.exe is a release asset)
+repo_owner: "AdxamAxatov"
+repo_name: "Watchdog"
+
+# Current version
+current_version: "1.0.0"
+
+# Executable name
+executable_name: "WindowChecker.exe"
+
+# Check interval (hours). 0.0333 ≈ 2 minutes. This is the inner file-guard;
+# the real cadence is the 120s UPDATE_CHECK_INTERVAL in window_checker_main.py.
+check_interval_hours: 0.0333
+
+# Silent mode (less logging)
+silent_mode: true
+
+# Backup old version before update
+backup_old_version: false
+
+# Task Scheduler task name for restarting after update.
+# Set this per-PC to WindowChecker's own task so the updater can relaunch it.
+task_scheduler_name: ""
+
+# Timeouts
+github_api_timeout: 10
+download_timeout: 60
+
+github_token: "PASTE_NEW_GITHUB_TOKEN_HERE"
+
+# Watchdog recovery: maps RDP window title keyword -> Windows username + Task
+# Scheduler task. When WindowChecker closes a BLACK/HUNG window, only the
+# matching user's Watchdog is killed and restarted. (Moved here from
+# boot_update_config.yaml now that WindowChecker owns RDP recovery.)
+watchdog_tasks:
+  - title_contains: ""   # e.g. "SinFermera1" — substring to match in the window title
+    username: ""          # e.g. "User1" — Windows username running Watchdog in that session
+    task_name: ""         # e.g. "WatchdogUser1" — Task Scheduler task to restart
+  - title_contains: ""
+    username: ""
+    task_name: ""

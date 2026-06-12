@@ -7,10 +7,9 @@ from datetime import datetime
 
 from steps.memreduct import run as mem_run
 from steps.rdp import run as rdp_run
-from steps.windows_focuser import run as focus_run
 from utils import load_yaml, exe_dir
 from auto_updater import check_updates
-from heartbeat import write_heartbeat, sleep_with_heartbeat
+from heartbeat import write_heartbeat
 
 
 def setup_boot_logger() -> logging.Logger:
@@ -34,7 +33,6 @@ def setup_boot_logger() -> logging.Logger:
 
 
 BOOT_UPDATE_CONFIG = os.path.join(exe_dir(), "config", "boot_update_config.yaml")
-UPDATE_CHECK_INTERVAL = 3600  # 1 hour
 
 
 def check_boot_update(log):
@@ -49,52 +47,6 @@ def check_boot_update(log):
                 log.warning(f"Auto-update failed: {error_msg}")
     except Exception as e:
         log.warning(f"Auto-update exception: {e}")
-
-
-def focus_run_with_updates(log, last_update_check):
-    """Wrap focus_run's loop with hourly Boot.exe update checks.
-
-    Each tick runs the RDP black-screen / hung recovery + (optional)
-    unconditional close-and-reopen cycle. CS2 recovery is left to Watchdog.exe.
-    """
-    from utils import load_yaml
-    from steps.windows_focuser import cycle_or_recover_rdp_windows
-    from datetime import datetime as dt
-
-    cfg = load_yaml("config/regions.yaml")
-    rdp_config = cfg.get("rdp_windows", {})
-    title_search = rdp_config.get("title_search", "SinFermera")
-    focus_interval_minutes = rdp_config.get("focus_interval_minutes", 30)
-    focus_interval_seconds = focus_interval_minutes * 60
-
-    log.info("RDP maintenance with update checks started (every %d min)", focus_interval_minutes)
-    cycle_count = 0
-
-    while True:
-        cycle_count += 1
-        write_heartbeat("boot")
-        now_str = dt.now().strftime("%Y-%m-%d %H:%M:%S")
-        print(f"\n[{now_str}] Cycle #{cycle_count}")
-        log.info(f"RDP maintenance cycle #{cycle_count}")
-
-        try:
-            closed, relaunched = cycle_or_recover_rdp_windows(title_search, log)
-            if closed > 0:
-                print(f"!! Closed {closed} RDP window(s) this tick")
-            if relaunched:
-                print("!! Relaunched host RDP stack")
-            if closed == 0 and not relaunched:
-                print("OK RDP healthy — nothing to do")
-        except Exception:
-            # A bad tick must never kill the maintenance loop.
-            log.exception("RDP maintenance tick failed — continuing")
-
-        # Hourly Boot.exe update check
-        if time.time() - last_update_check >= UPDATE_CHECK_INTERVAL:
-            check_boot_update(log)
-            last_update_check = time.time()
-
-        sleep_with_heartbeat("boot", focus_interval_seconds)
 
 
 def main():
@@ -146,17 +98,14 @@ def main():
         raise
 
     write_heartbeat("boot")  # post-RDP progress beat
-    log.info("=== BOOT COMPLETE ===")
-    
-    # NEW: Step 3: Focus Maintenance (runs continuously, with periodic update checks)
-    try:
-        log.info("Step 3: Focus Maintenance (with hourly update check)")
-        print("3️⃣  Starting Focus Maintenance...\n")
-        last_update_check = time.time()
-        focus_run_with_updates(log, last_update_check)
-    except Exception:
-        log.exception("Focus Maintenance step failed")
-        raise
+    log.info("=== BOOT COMPLETE — one-shot bootstrap done, exiting ===")
+    print("✅ Boot complete. Ongoing RDP-window health is handled by "
+          "WindowChecker.exe (its own Task Scheduler task).\n")
+    # Boot is now a ONE-SHOT bootstrapper: update check -> MemReduct -> RDP
+    # launch, then exit. The continuous RDP black-screen/hung recovery loop
+    # lives in WindowChecker.exe. NOTE: because Boot exits, the heartbeat
+    # health-checker should NOT monitor Boot.exe (it monitors WindowChecker
+    # instead) — see health_check.bat.
 
 
 if __name__ == "__main__":

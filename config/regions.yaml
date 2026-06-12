@@ -57,7 +57,19 @@ rdp:
     x: 0.2366
     y: 0.3300
   ui_wait_s: 5.0
-  dialog_wait_s: 1.0    
+  dialog_wait_s: 1.0
+
+  # --- Stuck-session reconnect (WindowChecker) ---
+  # Disconnect button inside RDP Session Manager (% of its client area).
+  disconnect_point_pct:
+    x: 0.4476
+    y: 0.1262
+  # Map each session entry above to the window title it opens. When a window
+  # does NOT reopen after a close, WindowChecker clicks that entry -> Disconnect
+  # -> entry again to force a reconnect. LEAVE BLANK to disable targeted
+  # reconnect (then only host-dead relaunch runs). Fill per-PC.
+  user1_title: ""   # e.g. "SinFermera23" — title user1_point_pct opens
+  user2_title: ""   # e.g. "SinFermera24" — title user2_point_pct opens
 
 rdp_windows:
   # Size for each RDP game window (SixFarmers15, SixFarmers16)
@@ -67,19 +79,12 @@ rdp_windows:
   title_search: "SinFermera"
   focus_interval_minutes: 30
 
-  # --- Black-screen / hung RDP recovery (added) ---
-  # Every tick the focuser samples each SinFermera window's client area.
-  # A window is treated as BLACK when its mean pixel brightness (0-255) stays
-  # below `blackness_threshold` for `blackness_consecutive` samples in a row,
-  # OR when is_window_responding() reports it hung.
-  blackness_threshold: 12        # mean brightness below this = "black"
-  blackness_consecutive: 2       # consecutive black samples required to act
-  reopen_wait_seconds: 12        # wait after closing before re-enumerating
-
-  # Owner's literal ask: "otherwise just close the windows every 30 min".
-  # When true, a healthy tick still closes each session window (RDP client
-  # auto-reopens it). Set false to only close BLACK/HUNG windows.
-  unconditional_cycle: true
+  # --- Reconnect cycle ---
+  # Every cycle WindowChecker disconnects+reconnects each session via the RDP
+  # Session Manager (rdp.user1_title/user2_title + disconnect_point_pct must be
+  # set). A renderer whose window survives its disconnect is FROZEN and gets
+  # force-killed, then reconnected.
+  reopen_wait_seconds: 15        # wait after the reconnects before re-enumerating
 
 # Drop-stats automation (DropStatsRunner.exe). All four are PLACEHOLDERS —
 # calibrate manually per-PC. Same percentage-of-client-area convention as
