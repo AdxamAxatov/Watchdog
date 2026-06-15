@@ -24,6 +24,9 @@ if not getattr(sys, "frozen", False):
     if str(_SRC) not in sys.path:
         sys.path.insert(0, str(_SRC))
 
+from utils import disable_quick_edit
+disable_quick_edit()  # stop a stray console click from freezing the loop
+
 
 def _exe_dir() -> str:
     if getattr(sys, "frozen", False):

@@ -1,5 +1,7 @@
 from winops import set_dpi_awareness
 set_dpi_awareness()
+from utils import disable_quick_edit
+disable_quick_edit()  # stop a stray console click from freezing the loop
 
 import sys
 import os

@@ -1,8 +1,9 @@
 import time
 from steps.memreduct import run as mem_clean
-from utils import load_yaml
+from utils import load_yaml, disable_quick_edit
 
 def main():
+    disable_quick_edit()  # stop a stray console click from freezing the loop
     cfg = load_yaml("config/regions.yaml")
     paths = cfg.get("paths", {})
     mem_exe = paths["memreduct_exe"][0]

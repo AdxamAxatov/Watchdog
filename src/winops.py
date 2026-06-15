@@ -245,9 +245,16 @@ def launch_exe(exe_path: str) -> None:
 def force_foreground(hwnd: int, tries: int = 8, sleep_s: float = 0.15) -> bool:
     """
     Hard focus: handles Windows focus restrictions better than SetForegroundWindow alone.
+    Escalates per attempt: plain SetForegroundWindow -> AttachThreadInput trick ->
+    ALT-tap (lifts the foreground lock) -> minimize+restore (forces activation).
     Returns True if foreground == hwnd.
     """
-    for _ in range(tries):
+    VK_MENU = 0x12
+    KEYEVENTF_KEYUP = 0x0002
+
+    for attempt in range(tries):
+        if win32gui.GetForegroundWindow() == hwnd:
+            return True
         try:
             win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
         except Exception:
@@ -287,6 +294,31 @@ def force_foreground(hwnd: int, tries: int = 8, sleep_s: float = 0.15) -> bool:
         time.sleep(sleep_s)
         if win32gui.GetForegroundWindow() == hwnd:
             return True
+
+        # ALT-tap trick: a synthetic ALT press/release makes this process the
+        # last input source, which lifts Windows' SetForegroundWindow lock.
+        try:
+            ctypes.windll.user32.keybd_event(VK_MENU, 0, 0, 0)
+            ctypes.windll.user32.keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0)
+            win32gui.SetForegroundWindow(hwnd)
+        except Exception:
+            pass
+
+        time.sleep(sleep_s)
+        if win32gui.GetForegroundWindow() == hwnd:
+            return True
+
+        # Last resort (second attempt onward): minimize+restore — Windows always
+        # activates a window restored from minimized, bypassing the focus lock.
+        if attempt >= 1:
+            try:
+                win32gui.ShowWindow(hwnd, win32con.SW_MINIMIZE)
+                win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+            except Exception:
+                pass
+            time.sleep(sleep_s)
+            if win32gui.GetForegroundWindow() == hwnd:
+                return True
     return False
 
 
@@ -310,58 +342,6 @@ def pct_to_screen_xy(hwnd: int, x_pct: float, y_pct: float) -> Tuple[int, int]:
     cw, ch = client_size(hwnd)
     cx, cy = client_origin_screen(hwnd)
     return cx + int(cw * x_pct), cy + int(ch * y_pct)
-
-
-def is_window_responding(hwnd: int, timeout_ms: int = 5000) -> bool:
-    """
-    Check if a window is responding.
-    Uses three methods:
-      1. IsHungAppWindow — same API Windows uses to show "Not Responding"
-      2. Title check — detects "(Not Responding)" / "Не отвечает" suffix
-      3. SendMessageTimeout with WM_NULL — fallback message-based check
-    Returns False if any method detects the window as hung.
-    """
-    # 1. IsHungAppWindow — most reliable, matches Windows' own ghost window detection
-    try:
-        if ctypes.windll.user32.IsHungAppWindow(hwnd):
-            return False
-    except Exception:
-        pass
-
-    # 2. Title-based detection (covers English and Russian locales)
-    try:
-        title = win32gui.GetWindowText(hwnd).lower()
-        hung_indicators = ["not responding", "не отвечает"]
-        for indicator in hung_indicators:
-            if indicator in title:
-                return False
-    except Exception:
-        pass
-
-    # 3. SendMessageTimeout with WM_NULL
-    SMTO_ABORTIFHUNG = 0x0002
-    result = ctypes.c_ulong(0)
-    ret = ctypes.windll.user32.SendMessageTimeoutW(
-        hwnd,
-        0,          # WM_NULL
-        0, 0,
-        SMTO_ABORTIFHUNG,
-        timeout_ms,
-        ctypes.byref(result),
-    )
-    return ret != 0
-
-
-def close_hung_window(hwnd: int) -> None:
-    """
-    Close a hung window by sending WM_CLOSE, then forcefully ending
-    the process if it doesn't close within a few seconds.
-    """
-    # Post WM_CLOSE (non-blocking, won't hang on unresponsive window)
-    try:
-        win32gui.PostMessage(hwnd, win32con.WM_CLOSE, 0, 0)
-    except Exception:
-        pass
 
 
 def safe_click(x: int, y: int, move_duration: float = 0.15) -> None:

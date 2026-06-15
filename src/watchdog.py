@@ -1,5 +1,7 @@
 from winops import set_dpi_awareness
 set_dpi_awareness()
+from utils import disable_quick_edit
+disable_quick_edit()  # stop a stray console click from freezing the loop
 
 import time
 import os
@@ -17,7 +19,6 @@ import win32console
 import ctypes
 import csv
 import io
-import random
 import win32process
 import win32ui
 from ctypes import windll
@@ -105,31 +106,51 @@ def capture_window_region_api(hwnd: int, x: int, y: int, w: int, h: int) -> np.n
     CRITICAL FIX: Uses GetDC (client area) instead of GetWindowDC (entire window).
     This ensures coordinates are relative to CLIENT area, matching our percentage calculations.
     """
+    hwndDC = mfcDC = saveDC = saveBitMap = None
     try:
         # FIXED: Use GetDC (client area) not GetWindowDC (includes title bar)
         hwndDC = win32gui.GetDC(hwnd)  # ← Changed from GetWindowDC
         mfcDC = win32ui.CreateDCFromHandle(hwndDC)
         saveDC = mfcDC.CreateCompatibleDC()
-        
+
         saveBitMap = win32ui.CreateBitmap()
         saveBitMap.CreateCompatibleBitmap(mfcDC, w, h)
         saveDC.SelectObject(saveBitMap)
-        
+
         # BitBlt from client area (x,y are now correct!)
         saveDC.BitBlt((0, 0), (w, h), mfcDC, (x, y), win32con.SRCCOPY)
-        
+
         bmpstr = saveBitMap.GetBitmapBits(True)
         img = np.frombuffer(bmpstr, dtype=np.uint8)
         img.shape = (h, w, 4)
-        
-        win32gui.DeleteObject(saveBitMap.GetHandle())
-        saveDC.DeleteDC()
-        mfcDC.DeleteDC()
-        win32gui.ReleaseDC(hwnd, hwndDC)
-        
+
         return cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
     except Exception:
         return None
+    finally:
+        # Always release GDI objects — even on the exception path above.
+        # Skipping this on failure leaks a DC + bitmap every bad capture,
+        # which accumulates into steady RAM/GDI-handle growth over a long run.
+        try:
+            if saveBitMap is not None:
+                win32gui.DeleteObject(saveBitMap.GetHandle())
+        except Exception:
+            pass
+        try:
+            if saveDC is not None:
+                saveDC.DeleteDC()
+        except Exception:
+            pass
+        try:
+            if mfcDC is not None:
+                mfcDC.DeleteDC()
+        except Exception:
+            pass
+        try:
+            if hwndDC is not None:
+                win32gui.ReleaseDC(hwnd, hwndDC)
+        except Exception:
+            pass
 
 
 def capture_logbox_client(hwnd: int, log_region: dict) -> np.ndarray:
@@ -880,9 +901,13 @@ def run_watchdog() -> None:
     first_run_completed_pids: dict[int, None] = {}  # insertion-ordered "set" of PIDs we've already onboarded
     last_explorer_restart_ts = time.time()  # Periodic explorer restart every 30 min
     last_cs2_check_ts = 0.0  # CS2 instance check every 5 min
-    # Stagger first update check by 0-120s so dual-session users don't download simultaneously
-    _update_stagger = random.randint(0, 120)
-    last_update_check_ts = time.time() - 3600 + _update_stagger
+    # Auto-update cadence (seconds). Fire the FIRST check on the very first
+    # loop iteration — right after launch, matching Boot's startup check —
+    # by backdating the timestamp a full interval. Then every _UPDATE_INTERVAL.
+    # (Previously a 0-120s startup stagger + the 180s poll pushed the first
+    # check out to ~180s, so Watchdog "didn't detect on launch" like Boot did.)
+    _UPDATE_INTERVAL = 120
+    last_update_check_ts = time.time() - _UPDATE_INTERVAL
 
     print(f"\nWatchdog started | timeout={general_timeout}m poll={poll}s\n")
 
@@ -898,8 +923,8 @@ def run_watchdog() -> None:
         # Reset each iteration so a prior recovery can't stick it off
         normalize_every = bool(app["watchdog"].get("normalize_every_loop", True))
 
-        # === PERIODIC AUTO-UPDATE CHECK (every 1 hour) ===
-        if time.time() - last_update_check_ts >= 3600:
+        # === PERIODIC AUTO-UPDATE CHECK (every 2 minutes) ===
+        if time.time() - last_update_check_ts >= _UPDATE_INTERVAL:
             try:
                 log.info("Auto-update: checking...")
                 update_result = check_updates()
