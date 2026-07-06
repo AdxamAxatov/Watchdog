@@ -2,15 +2,17 @@
 # bootstrap_box.sh — one-time per-box install/upgrade of the Watchdog stack.
 #
 # Usage:
-#   ./scripts/bootstrap_box.sh <user@host> <password-file> <dist-dir> <farm-token>
+#   ./scripts/bootstrap_box.sh <user@host> <password-file> <dist-dir> <token-file>
 #
 #   <user@host>      e.g. Farmer7@192.168.1.132 (main-session admin user)
 #   <password-file>  file containing ONLY the ssh password (chmod 600)
 #   <dist-dir>       local dir with the release exes, e.g. after:
 #                      gh release download -R AdxamAxatov/Watchdog -p '*.exe' -D dist
-#   <farm-token>     per-box X-Farm-Token written into farm_agent_config.yaml
-#                    (only if the box has no config yet) and used for the
-#                    acceptance check.
+#   <token-file>     file (chmod 600) containing ONLY the per-box X-Farm-Token,
+#                    written into farm_agent_config.yaml (only if the box has no
+#                    config yet) and used for the acceptance check. Passed as a
+#                    FILE, not on the command line, so the secret never lands in
+#                    the shell history or `ps` output.
 #
 # What it does (idempotent; every step echoes a receipt; aborts loudly):
 #   1. stop WindowChecker/FarmAgent tasks + processes
@@ -23,10 +25,13 @@
 #   6. restart everything and curl /status as the acceptance gate
 #
 # Inventory loop example:
-#   while read -r box; do ./scripts/bootstrap_box.sh "$box" .pw dist "$TOKEN"; done < farm_inventory
+#   while read -r box; do ./scripts/bootstrap_box.sh "$box" .pw dist .farmtoken; done < farm_inventory
 set -euo pipefail
 
-BOX="${1:?user@host}"; PWFILE="${2:?password file}"; DIST="${3:?dist dir}"; TOKEN="${4:?farm token}"
+BOX="${1:?user@host}"; PWFILE="${2:?password file}"; DIST="${3:?dist dir}"; TOKENFILE="${4:?token file}"
+[ -f "$TOKENFILE" ] || { echo "FATAL: token file '$TOKENFILE' not found"; exit 1; }
+TOKEN="$(tr -d '\r\n' < "$TOKENFILE")"
+[ -n "$TOKEN" ] || { echo "FATAL: token file '$TOKENFILE' is empty"; exit 1; }
 HOST="${BOX#*@}"; RUSER="${BOX%@*}"
 PORT=8765
 DOCS="C:/Users/${RUSER}/Documents"
@@ -61,9 +66,18 @@ echo "== [$BOX] 4/6 config templates (only where missing)"
 for app in WindowChecker FarmAgent; do
   ssh_run "cmd /c if not exist \"${DOCS//\//\\}\\${app}\\config\" mkdir \"${DOCS//\//\\}\\${app}\\config\" & echo cfgdir-${app}-ok" | tail -1
 done
-# FarmAgent configs (write only if absent; token substituted locally first)
+# FarmAgent configs (write only if absent; token substituted locally first).
+# The temp file holds the real token — guarantee its removal even on an
+# scp/ssh failure under `set -e` (M4). Match the exact `token: ""` line and
+# emit the replacement via plain string CONCATENATION (not sub()/sed) so token
+# metacharacters (/ & \) are always literal — sub()'s replacement treats & and
+# \ specially, which corrupts the value (M5).
 TMPCFG="$(mktemp)"
-sed "s/^token: \"\"/token: \"${TOKEN}\"/" config/farm_agent_config.yaml > "$TMPCFG"
+trap 'rm -f "$TMPCFG"' EXIT
+# Pass the token via ENVIRON (not -v): -v pre-processes backslash escapes in
+# the value, ENVIRON is fully literal.
+FARM_TOKEN="$TOKEN" awk '$0=="token: \"\"" { print "token: \"" ENVIRON["FARM_TOKEN"] "\""; next } { print }' \
+    config/farm_agent_config.yaml > "$TMPCFG"
 if ssh_run "cmd /c if exist \"${DOCS//\//\\}\\FarmAgent\\config\\farm_agent_config.yaml\" (echo EXISTS) else (echo ABSENT)" | grep -q ABSENT; then
   push "$TMPCFG" "$DOCS/FarmAgent/config/farm_agent_config.yaml"
   push "config/farm_agent_update_config.yaml" "$DOCS/FarmAgent/config/farm_agent_update_config.yaml"
@@ -71,7 +85,7 @@ if ssh_run "cmd /c if exist \"${DOCS//\//\\}\\FarmAgent\\config\\farm_agent_conf
 else
   echo "   farm_agent_config.yaml already on box — left untouched"
 fi
-rm -f "$TMPCFG"
+rm -f "$TMPCFG"; trap - EXIT
 
 echo "== [$BOX] 5/6 registering FarmAgent tasks"
 FA_EXE="${DOCS//\//\\}\\FarmAgent\\FarmAgent.exe"
