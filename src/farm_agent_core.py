@@ -101,7 +101,15 @@ _ACTION_ROUTES = {
 def make_api_server(host, port, token, status_provider, action_executor):
     """Token-authed JSON API. GET /status; POST /action/<route>[/<arg>].
     Silence-is-unhealthy contract: Sherlock treats a timeout as the alert,
-    so this server never needs outbound connectivity."""
+    so this server never needs outbound connectivity.
+
+    FAIL-CLOSED: an empty/blank token would let any request carrying an empty
+    X-Farm-Token header through — refuse to build the server instead. The
+    caller must run WITHOUT the API rather than with an open one."""
+    if not (token or "").strip():
+        raise ValueError("refusing to start API with empty token — set "
+                         "farm_agent_config.yaml 'token' (box stays autonomous, "
+                         "just unreachable remotely)")
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *a):  # quiet — agent has its own log

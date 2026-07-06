@@ -106,5 +106,17 @@ class TestApi(unittest.TestCase):
         self.assertEqual(self._req("POST", "/action/nuke")[0], 404)
         self.assertEqual(self._req("GET", "/nope")[0], 404)
 
+
+class TestEmptyTokenFailsClosed(unittest.TestCase):
+    """An empty token must never yield a listening API — an empty
+    X-Farm-Token header would match it and open the control plane."""
+
+    def test_empty_token_refused(self):
+        for bad in ("", "   ", None):
+            with self.assertRaises(ValueError):
+                make_api_server("127.0.0.1", 0, bad,
+                                status_provider=lambda: {},
+                                action_executor=lambda name, arg=None: {})
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
