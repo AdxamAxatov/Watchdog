@@ -136,7 +136,8 @@ def main():
     ladder = EscalationLadder(
         os.path.join(exe_dir(), "logs", "ladder_state.json"),
         unhealthy_loops_before_reboot=cfg.get("unhealthy_loops_before_reboot", 3),
-        reboot_min_interval_s=cfg.get("reboot_min_interval_s", 7200))
+        reboot_min_interval_s=cfg.get("reboot_min_interval_s", 7200),
+        renderers_unhealthy_loops_before_action=cfg.get("renderers_unhealthy_loops_before_action", 10))
     executor = ActionExecutor(cfg, log)
     last = {"snapshot": {}, "checks": []}
 
@@ -148,9 +149,21 @@ def main():
                 "ladder": ladder.state,
                 "ts": datetime.now().isoformat(timespec="seconds")}
 
+    def api_executor(name, arg=None):
+        # The API's reboot MUST honor the same rate limit as the escalation
+        # ladder (I2) — an authed or looping caller could otherwise boot-loop
+        # the box. Body {"force": true} deliberately overrides the limit.
+        if name == "reboot":
+            force = bool(arg.get("force")) if isinstance(arg, dict) else False
+            if not ladder.try_consume_reboot(force=force):
+                return {"skipped": "reboot rate-limited",
+                        "min_interval_s": ladder.reboot_min_interval_s}
+            return executor("reboot")
+        return executor(name, arg)
+
     try:
         srv = make_api_server(cfg.get("bind", "0.0.0.0"), int(cfg.get("port", 8765)),
-                              str(cfg.get("token", "")), status, executor)
+                              str(cfg.get("token", "")), status, api_executor)
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         log.info("API listening on %s:%s", cfg.get("bind", "0.0.0.0"), cfg.get("port", 8765))
     except ValueError as e:
@@ -172,7 +185,15 @@ def main():
                             [c["check"] for c in checks if not c["healthy"]], actions)
             for a in actions:
                 name, _, arg = a.partition(":")
-                executor(name, arg or None)
+                if name == "reboot":
+                    # Escalation reboot goes through the SAME rate gate as the
+                    # API path (I2) — the ladder only REQUESTS it.
+                    if ladder.try_consume_reboot(force=False):
+                        executor("reboot")
+                    else:
+                        log.info("Reboot requested but suppressed by rate limit")
+                else:
+                    executor(name, arg or None)
         except Exception:
             log.exception("agent loop error — continuing")
         time.sleep(LOOP_SECONDS)

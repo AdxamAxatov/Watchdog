@@ -4,6 +4,7 @@ STDLIB ONLY — no pywin32, no requests. This module never touches a window
 handle or spawns a process; adapters live in farm_agent_main.py. That split is
 deliberate (ADR-001): the supervisor must not share the failure modes of what
 it supervises, and this half stays unit-testable on any OS."""
+import hmac
 import json
 import os
 import time
@@ -36,11 +37,15 @@ class EscalationLadder:
     (ADR-003: max 1 reboot / reboot_min_interval_s — no boot loops)."""
 
     def __init__(self, state_path, clock=time.time,
-                 unhealthy_loops_before_reboot=3, reboot_min_interval_s=7200):
+                 unhealthy_loops_before_reboot=3, reboot_min_interval_s=7200,
+                 renderers_unhealthy_loops_before_action=10):
         self.state_path = state_path
         self.clock = clock
         self.n_before_reboot = int(unhealthy_loops_before_reboot)
         self.reboot_min_interval_s = float(reboot_min_interval_s)
+        # Renderer count dips every WindowChecker reconnect cycle; only a
+        # SUSTAINED shortfall (this many consecutive loops) escalates.
+        self.renderers_loops_before_action = int(renderers_unhealthy_loops_before_action)
         self.state = self._load()
 
     def _load(self):
@@ -60,7 +65,27 @@ class EscalationLadder:
 
     def next_actions(self, checks):
         by = {c["check"]: c for c in checks}
-        unhealthy = [c for c in checks if not c["healthy"]]
+        hb_bad = not by["wc_heartbeat"]["healthy"]
+        proc_bad = not by["wc_process"]["healthy"]
+        rend_bad = not by["renderers"]["healthy"]
+
+        # Renderer debounce (I1): the reconnect cycle disconnects every session
+        # for ~30-60s each pass, so a single low sample is a healthy dip — WC is
+        # mid-recovery. Track a streak; only a SUSTAINED shortfall means WC is
+        # alive-but-stuck. Killing a live WC mid-cycle would fight its own
+        # recovery, so a lone dip must never trigger a restart.
+        if rend_bad:
+            self.state["renderers_bad_streak"] = int(self.state.get("renderers_bad_streak", 0)) + 1
+        else:
+            self.state["renderers_bad_streak"] = 0
+        rend_sustained = self.state["renderers_bad_streak"] >= self.renderers_loops_before_action
+
+        # WC is "broken" (restart it) only on an unambiguous signal: stale
+        # heartbeat, dead process, or a sustained renderer shortfall.
+        wc_broken = hb_bad or proc_bad or rend_sustained
+        missing_users = by["watchdogs"].get("missing_users", [])
+        unhealthy = wc_broken or bool(missing_users)
+
         actions = []
         if not unhealthy:
             self.state["consecutive_unhealthy"] = 0
@@ -68,22 +93,32 @@ class EscalationLadder:
             return actions
         self.state["consecutive_unhealthy"] = int(self.state.get("consecutive_unhealthy", 0)) + 1
 
-        if not by["wc_heartbeat"]["healthy"] or not by["wc_process"]["healthy"] \
-                or not by["renderers"]["healthy"]:
+        if wc_broken:
             actions.append("restart_windowchecker")
-        for user in by["watchdogs"].get("missing_users", []):
+        for user in missing_users:
             actions.append(f"run_watchdog_task:{user}")
 
+        # Reboot is only REQUESTED here; the rate limit is enforced at execution
+        # by try_consume_reboot — the single gate shared with the API path (I2).
         if self.state["consecutive_unhealthy"] >= self.n_before_reboot:
-            last = float(self.state.get("last_reboot_ts", 0.0))
-            # last <= 0 == never rebooted: the rate limit must not block the
-            # FIRST reboot (only re-reboots within the window).
-            if last <= 0 or (self.clock() - last) >= self.reboot_min_interval_s:
-                actions.append("reboot")
-                self.state["last_reboot_ts"] = self.clock()
-                self.state["consecutive_unhealthy"] = 0
+            actions.append("reboot")
         self._save()
         return actions
+
+    def try_consume_reboot(self, force=False):
+        """Authorize a reboot NOW, or refuse it. Returns True (and stamps the
+        timestamp + resets the unhealthy counter) when allowed: always if
+        force, else at most once per reboot_min_interval_s (ADR-003 boot-loop
+        guard). The SINGLE enforcement point — both the escalation loop and the
+        API /action/reboot route call this, so neither can bypass the limit."""
+        if not force:
+            last = float(self.state.get("last_reboot_ts", 0.0))
+            if last > 0 and (self.clock() - last) < self.reboot_min_interval_s:
+                return False
+        self.state["last_reboot_ts"] = self.clock()
+        self.state["consecutive_unhealthy"] = 0
+        self._save()
+        return True
 
 
 # ---- HTTP control plane (consumed by Sherlock Homeless) ---------------------
@@ -124,7 +159,10 @@ def make_api_server(host, port, token, status_provider, action_executor):
             self.wfile.write(body)
 
         def _authed(self):
-            if self.headers.get("X-Farm-Token") != token:
+            # Constant-time compare (M1) — token is guaranteed non-empty by the
+            # fail-closed guard above.
+            provided = self.headers.get("X-Farm-Token") or ""
+            if not hmac.compare_digest(provided, token):
                 self._send(401, {"error": "bad token"})
                 return False
             return True
@@ -146,13 +184,26 @@ def make_api_server(host, port, token, status_provider, action_executor):
             parts = [p for p in self.path.split("/") if p]
             if len(parts) >= 2 and parts[0] == "action" and parts[1] in _ACTION_ROUTES:
                 name, takes_arg = _ACTION_ROUTES[parts[1]]
-                arg = parts[2] if (takes_arg and len(parts) > 2) else None
-                if takes_arg and not arg:
-                    self._send(400, {"error": "missing argument"})
-                    return
+                # Parse an optional JSON body (used by /action/reboot: {"force":true}).
                 try:
-                    self._send(200, action_executor(name, arg) if takes_arg
-                               else action_executor(name))
+                    length = int(self.headers.get("Content-Length") or 0)
+                    raw = self.rfile.read(length) if length > 0 else b""
+                    body = json.loads(raw) if raw else {}
+                    if not isinstance(body, dict):
+                        body = {}
+                except Exception:
+                    body = {}
+                if takes_arg:
+                    arg = parts[2] if len(parts) > 2 else None
+                    if not arg:
+                        self._send(400, {"error": "missing argument"})
+                        return
+                    call_arg = arg
+                else:
+                    # No-arg routes receive the parsed body dict as their arg.
+                    call_arg = body
+                try:
+                    self._send(200, action_executor(name, call_arg))
                 except Exception as e:
                     self._send(500, {"error": str(e)})
             else:

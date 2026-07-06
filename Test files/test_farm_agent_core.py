@@ -45,19 +45,19 @@ class TestLadder(unittest.TestCase):
         acts = self.ladder.next_actions(self.unhealthy())
         self.assertIn("restart_windowchecker", acts)
         self.assertNotIn("reboot", acts)
-    def test_reboot_after_three_consecutive(self):
+    def test_reboot_requested_after_three_consecutive(self):
         for _ in range(2):
             self.assertNotIn("reboot", self.ladder.next_actions(self.unhealthy()))
         self.assertIn("reboot", self.ladder.next_actions(self.unhealthy()))
-    def test_reboot_rate_limited(self):
-        for _ in range(3): self.ladder.next_actions(self.unhealthy())
-        # 3 more unhealthy loops right after: counter is there but rate limit blocks
-        for _ in range(3):
-            self.assertNotIn("reboot", self.ladder.next_actions(self.unhealthy()))
+    def test_try_consume_reboot_rate_limited(self):
+        self.assertTrue(self.ladder.try_consume_reboot())     # first reboot allowed
+        self.assertFalse(self.ladder.try_consume_reboot())    # within 2h → blocked
         self.clock.t += 7201
-        seen = []
-        for _ in range(3): seen += self.ladder.next_actions(self.unhealthy())
-        self.assertIn("reboot", seen)  # fires on the first eligible loop, then counter resets
+        self.assertTrue(self.ladder.try_consume_reboot())     # window elapsed → allowed
+    def test_try_consume_reboot_force_overrides(self):
+        self.assertTrue(self.ladder.try_consume_reboot())
+        self.assertFalse(self.ladder.try_consume_reboot())            # blocked
+        self.assertTrue(self.ladder.try_consume_reboot(force=True))   # force overrides limit
     def test_missing_watchdog_action_is_targeted(self):
         checks = evaluate_health(sick(missing_watchdog_users=["SinFermera11"]), THRESH)
         self.assertIn("run_watchdog_task:SinFermera11", self.ladder.next_actions(checks))
@@ -65,6 +65,34 @@ class TestLadder(unittest.TestCase):
         for _ in range(2): self.ladder.next_actions(self.unhealthy())
         reloaded = EscalationLadder(self.state, clock=self.clock)
         self.assertIn("reboot", reloaded.next_actions(self.unhealthy()))
+
+
+class TestRendererDebounce(unittest.TestCase):
+    """I1: a renderer count dip (every reconnect cycle drops sessions ~30-60s)
+    must NOT restart a live WindowChecker; only a sustained shortfall does."""
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.clock = FakeClock()
+        # threshold 3 so the test is short; production default is 10.
+        self.ladder = EscalationLadder(str(Path(self.dir) / "l.json"), clock=self.clock,
+                                       renderers_unhealthy_loops_before_action=3)
+    def rend_low(self):
+        # heartbeat FRESH + process up, but one renderer missing (reconnect dip)
+        return evaluate_health(sick(renderer_count=1), THRESH)
+    def test_transient_dip_does_not_restart_wc(self):
+        self.assertNotIn("restart_windowchecker", self.ladder.next_actions(self.rend_low()))
+        self.assertNotIn("restart_windowchecker", self.ladder.next_actions(self.rend_low()))
+    def test_sustained_shortfall_restarts_wc(self):
+        self.ladder.next_actions(self.rend_low())  # streak 1
+        self.ladder.next_actions(self.rend_low())  # streak 2
+        self.assertIn("restart_windowchecker", self.ladder.next_actions(self.rend_low()))  # 3 == threshold
+    def test_recovery_resets_streak(self):
+        self.ladder.next_actions(self.rend_low())  # streak 1
+        self.ladder.next_actions(self.rend_low())  # streak 2
+        self.ladder.next_actions(evaluate_health(HEALTHY, THRESH))  # healthy → reset
+        # streak restarts from 1; two more dips still below threshold
+        self.assertNotIn("restart_windowchecker", self.ladder.next_actions(self.rend_low()))
+        self.assertNotIn("restart_windowchecker", self.ladder.next_actions(self.rend_low()))
 
 import http.client, threading
 from farm_agent_core import make_api_server
@@ -105,6 +133,33 @@ class TestApi(unittest.TestCase):
     def test_unknown_404(self):
         self.assertEqual(self._req("POST", "/action/nuke")[0], 404)
         self.assertEqual(self._req("GET", "/nope")[0], 404)
+
+
+class TestApiRebootBody(unittest.TestCase):
+    """I2: the API reboot path must be able to receive {"force": true} in the
+    body — make_api_server passes the parsed body to no-arg routes as `arg`."""
+    @classmethod
+    def setUpClass(cls):
+        cls.seen = []
+        cls.srv = make_api_server(
+            "127.0.0.1", 0, "sekret",
+            status_provider=lambda: {},
+            action_executor=lambda name, arg=None: (cls.seen.append((name, arg)) or {"ran": name}))
+        threading.Thread(target=cls.srv.serve_forever, daemon=True).start()
+        cls.port = cls.srv.server_address[1]
+    @classmethod
+    def tearDownClass(cls):
+        cls.srv.shutdown()
+    def _post(self, path, body=None):
+        c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        c.request("POST", path, body=body, headers={"X-Farm-Token": "sekret"})
+        return c.getresponse().status
+    def test_reboot_force_body_reaches_executor(self):
+        self.assertEqual(self._post("/action/reboot", json.dumps({"force": True})), 200)
+        self.assertEqual(self.seen[-1], ("reboot", {"force": True}))
+    def test_reboot_no_body_passes_empty_dict(self):
+        self.assertEqual(self._post("/action/reboot"), 200)
+        self.assertEqual(self.seen[-1], ("reboot", {}))
 
 
 class TestEmptyTokenFailsClosed(unittest.TestCase):
