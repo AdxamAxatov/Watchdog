@@ -357,3 +357,49 @@ def safe_double_click(x: int, y: int, move_duration: float = 0.15, interval: flo
     pyautogui.moveRel(-1, 0, duration=0)
     pyautogui.moveTo(x, y, duration=move_duration)
     pyautogui.doubleClick(interval=interval)
+
+
+# ---- hung-window primitives (farm self-healing R1/R4) ----------------------
+
+SMTO_ABORTIFHUNG = 0x0002
+
+
+def window_responsive(hwnd: int, timeout_ms: int = 2000) -> bool:
+    """True if the window's thread is pumping messages.
+
+    Fail-open: a probe *error* reports responsive (all mutating callers use
+    async flags, so a wrong 'responsive' cannot re-create the SetWindowPos
+    deadlock; a wrong 'hung' could kill a healthy session)."""
+    try:
+        if ctypes.windll.user32.IsHungAppWindow(hwnd):
+            return False
+        res = ctypes.windll.user32.SendMessageTimeoutW(
+            hwnd, 0x0000, 0, 0, SMTO_ABORTIFHUNG, timeout_ms,
+            ctypes.byref(ctypes.c_ulong()))
+        return bool(res)
+    except Exception:
+        return True
+
+
+def resolve_real_hwnd(hwnd: int) -> int:
+    """Map a DWM ghost window back to the real hung window; identity otherwise.
+
+    Ghost windows (class 'Ghost') are owned by dwm.exe — acting on the ghost's
+    pid would target the compositor (observed root-risk on host-67)."""
+    try:
+        if win32gui.GetClassName(hwnd) == "Ghost":
+            real = ctypes.windll.user32.HungWindowFromGhostWindow(hwnd)
+            if real:
+                return int(real)
+    except Exception:
+        pass
+    return hwnd
+
+
+def process_image_of(hwnd: int) -> str:
+    """Lowercase exe basename owning hwnd, or '' on failure."""
+    try:
+        _, pid = win32process.GetWindowThreadProcessId(hwnd)
+        return os.path.basename(_query_full_process_image_name(pid)).lower()
+    except Exception:
+        return ""
