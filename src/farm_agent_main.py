@@ -50,10 +50,31 @@ def _tasklist_count(image, username=None):
         return 0
 
 
-def _wc_heartbeat_age():
+def _wc_heartbeat_dirs(cfg):
+    """Candidate directories that may hold WindowChecker's heartbeat file.
+
+    CRITICAL: FarmAgent and WindowChecker live in SEPARATE deploy folders, so
+    WindowChecker writes its heartbeat to WindowChecker\\logs, NOT FarmAgent's
+    own logs dir. Looking only in exe_dir()/logs finds nothing → the agent
+    thinks WC is dead and restart-loops it (observed live on host-67). Resolve
+    the real location: explicit config wins, else the sibling WindowChecker
+    folder, else this exe's own logs as a last resort."""
+    dirs = []
+    configured = cfg.get("windowchecker_heartbeat_dir")
+    if configured:
+        dirs.append(configured)
+    # Sibling deploy folder: <Documents>\WindowChecker\logs, computed from
+    # <Documents>\FarmAgent (exe_dir's parent is the Documents-style root).
+    dirs.append(os.path.join(os.path.dirname(exe_dir()), "WindowChecker", "logs"))
+    dirs.append(os.path.join(exe_dir(), "logs"))
+    return dirs
+
+
+def _wc_heartbeat_age(cfg):
     """Age (s) of the freshest WindowChecker heartbeat file, or None."""
-    cands = glob.glob(os.path.join(exe_dir(), "logs", "windowchecker_heartbeat_*.txt"))
-    # WindowChecker deploys to its own folder; allow a configured extra path too.
+    cands = []
+    for d in _wc_heartbeat_dirs(cfg):
+        cands.extend(glob.glob(os.path.join(d, "windowchecker_heartbeat_*.txt")))
     if not cands:
         return None
     newest = max(os.stat(p).st_mtime for p in cands)
@@ -65,7 +86,7 @@ def collect_snapshot(cfg):
     missing = [u for u in watchdog_tasks
                if _tasklist_count("Watchdog.exe", username=u) == 0]
     return {
-        "wc_heartbeat_age_s": _wc_heartbeat_age(),
+        "wc_heartbeat_age_s": _wc_heartbeat_age(cfg),
         "wc_running": _tasklist_count("WindowChecker.exe") > 0,
         "renderer_count": _tasklist_count("wfreerdp.exe"),
         "expected_sessions": int(cfg.get("expected_sessions", 2)),
