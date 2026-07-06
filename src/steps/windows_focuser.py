@@ -28,19 +28,26 @@ from utils import exe_dir, load_yaml
 
 
 def find_rdp_windows(title_substring="SinFermera"):
-    """
-    Find all RDP game windows matching title substring.
+    """All wfreerdp-owned windows matching the title. Ghost hwnds are resolved
+    to the real (hung) window; non-renderer processes (explorer folders named
+    'SinFermera', etc.) are excluded so they can never be killed/repositioned.
 
     Returns:
         List of (hwnd, title) tuples
     """
+    from winops import resolve_real_hwnd, process_image_of
     windows = []
 
     def enum_callback(hwnd, results):
-        if win32gui.IsWindowVisible(hwnd):
-            title = win32gui.GetWindowText(hwnd)
-            if title and title_substring.lower() in title.lower():
-                results.append((hwnd, title))
+        if not win32gui.IsWindowVisible(hwnd):
+            return
+        title = win32gui.GetWindowText(hwnd)
+        if not (title and title_substring.lower() in title.lower()):
+            return
+        real = resolve_real_hwnd(hwnd)
+        if process_image_of(real) != "wfreerdp.exe":
+            return
+        results.append((real, title))
 
     win32gui.EnumWindows(enum_callback, windows)
     return windows
@@ -93,8 +100,9 @@ def restart_watchdog_for_titles(closed_titles, log=None):
             if not title_match or not username or not task_name:
                 continue
 
-            # Check if any closed window title matches this entry
-            matched = any(title_match.lower() in ct.lower() for ct in closed_titles)
+            # Boundary match (not substring): "SinFermera1" must NOT match
+            # "SinFermera16" — same rule as _title_matches_session.
+            matched = any(_title_matches_session(ct, title_match) for ct in closed_titles)
             if not matched:
                 continue
 
@@ -280,6 +288,14 @@ def reposition_rdp_windows_to_corners(windows, log=None):
         try:
             if not win32gui.IsWindow(hwnd):
                 continue
+            # R1: NEVER make a synchronous win32 call into a frozen window's
+            # thread — that deadlocked WindowChecker on 7/4 and 7/6.
+            from winops import window_responsive
+            if not window_responsive(hwnd):
+                if log:
+                    log.warning("Reposition: %s NOT RESPONDING — skipping (frozen renderer)", title)
+                print(f"   !! Skipping frozen window: {title}")
+                continue
             win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
             l, t, r, b = win32gui.GetWindowRect(hwnd)
             w, h = r - l, b - t
@@ -289,7 +305,7 @@ def reposition_rdp_windows_to_corners(windows, log=None):
                 x, y = work_right - w, work_bottom - h
             win32gui.SetWindowPos(
                 hwnd, win32con.HWND_TOP, x, y, 0, 0,
-                win32con.SWP_NOSIZE | win32con.SWP_SHOWWINDOW,
+                win32con.SWP_NOSIZE | win32con.SWP_SHOWWINDOW | win32con.SWP_ASYNCWINDOWPOS,
             )
             if log:
                 log.info("Reposition: %s -> %s at (%d, %d)", title, corner, x, y)
@@ -435,7 +451,7 @@ def cycle_or_recover_rdp_windows(title_search="SinFermera", log=None, beat=None)
     configured_sessions = [(t, p) for t, p in expected_sessions if t and p]
     reconnect_mode = bool(disconnect_pct) and bool(configured_sessions)
 
-    windows = find_rdp_windows(title_search)[:2]  # only the 2 sessions
+    windows = find_rdp_windows(title_search)  # exe-filtered; no z-order truncation
     if not windows:
         if log:
             log.warning("No SinFermera windows found at tick start")

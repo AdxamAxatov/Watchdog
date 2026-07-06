@@ -43,6 +43,16 @@ from heartbeat import write_heartbeat, sleep_with_heartbeat
 from steps.windows_focuser import cycle_or_recover_rdp_windows
 
 HEARTBEAT_NAME = "windowchecker"
+
+
+def acquire_single_instance_or_exit(log=None) -> None:
+    """Named mutex — a second WindowChecker exits immediately (R6)."""
+    import ctypes
+    ctypes.windll.kernel32.CreateMutexW(None, False, "Global\\WindowCheckerSingleton")
+    if ctypes.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+        msg = "Another WindowChecker instance is already running — exiting."
+        (log.error if log else print)(msg)
+        raise SystemExit(0)
 UPDATE_CONFIG = os.path.join(exe_dir(), "config", "windowchecker_update_config.yaml")
 UPDATE_CHECK_INTERVAL = 120   # self-update check cadence (seconds)
 BASE_TICK_SECONDS = 120       # loop granularity; update check runs each tick
@@ -85,6 +95,7 @@ def main() -> int:
 
     log = setup_logger()
     log.info("=== WindowChecker STARTED ===")
+    acquire_single_instance_or_exit(log)
 
     # Detect a new build right after launch (matches Boot/Watchdog startup check).
     check_update(log)
@@ -92,7 +103,8 @@ def main() -> int:
     cfg = load_yaml("config/regions.yaml") or {}
     rdp_cfg = cfg.get("rdp_windows", {}) or {}
     title_search = rdp_cfg.get("title_search", "SinFermera")
-    focus_interval_minutes = rdp_cfg.get("focus_interval_minutes", 30)
+    from recovery_rules import effective_focus_interval
+    focus_interval_minutes = effective_focus_interval(rdp_cfg.get("focus_interval_minutes", 30))
     focus_interval_seconds = focus_interval_minutes * 60
 
     log.info("RDP health cycle every %d min; self-update check every %ds",
