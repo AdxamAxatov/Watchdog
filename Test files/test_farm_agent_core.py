@@ -1,5 +1,5 @@
 """Unit tests for src/farm_agent_core.py (stdlib-only — runs anywhere)."""
-import json, sys, tempfile, unittest
+import json, os, sys, tempfile, unittest
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from farm_agent_core import evaluate_health, EscalationLadder
@@ -172,6 +172,28 @@ class TestEmptyTokenFailsClosed(unittest.TestCase):
                 make_api_server("127.0.0.1", 0, bad,
                                 status_provider=lambda: {},
                                 action_executor=lambda name, arg=None: {})
+
+class TestHeartbeatDirResolution(unittest.TestCase):
+    """Regression for the host-67 live bug: FarmAgent looked for WindowChecker's
+    heartbeat in its OWN logs dir (different deploy folder) → wc_heartbeat=None
+    → restart-loop. Resolution must include the sibling WindowChecker\\logs and
+    honor an explicit config path."""
+    def setUp(self):
+        import farm_agent_main
+        self.fam = farm_agent_main
+    def test_configured_dir_wins_and_is_first(self):
+        dirs = self.fam._wc_heartbeat_dirs({"windowchecker_heartbeat_dir": "/x/wc/logs"})
+        self.assertEqual(dirs[0], "/x/wc/logs")
+    def test_empty_config_is_ignored(self):
+        dirs = self.fam._wc_heartbeat_dirs({"windowchecker_heartbeat_dir": ""})
+        self.assertTrue(all(d for d in dirs))  # no empty-string dir leaks in
+    def test_sibling_windowchecker_logs_always_searched(self):
+        # the exact miss on host-67: the sibling WindowChecker\logs dir must be
+        # a candidate even with no config set.
+        dirs = self.fam._wc_heartbeat_dirs({})
+        self.assertTrue(any(os.path.join("WindowChecker", "logs") in d for d in dirs),
+                        f"sibling WindowChecker/logs not searched: {dirs}")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

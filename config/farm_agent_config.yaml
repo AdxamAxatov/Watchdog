@@ -28,6 +28,12 @@ reboot_min_interval_s: 7200
 # Task Scheduler task names on this box.
 windowchecker_task: "WindowsChecker"
 
+# Where WindowChecker writes its heartbeat. FarmAgent and WindowChecker live in
+# SEPARATE deploy folders, so this must point at WindowChecker's logs dir — NOT
+# FarmAgent's. Leave blank to auto-resolve the sibling <Documents>\WindowChecker
+# \logs; set explicitly if the deploy layout differs.
+windowchecker_heartbeat_dir: ""
+
 # Map RDP username -> its Watchdog Task Scheduler task.
 watchdog_users:
   SinFermera11: "Watchdog11"
