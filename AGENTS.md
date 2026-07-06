@@ -24,19 +24,63 @@ pip install -r requirements.txt
 
 ## Building executables
 
+Releases are **automated by CI** — see [Releases (CI-on-push)](#releases-ci-on-push).
+Manual builds are for local testing only:
+
 ```bash
 pyinstaller Watchdog.spec
 # Output: dist\Watchdog.exe
 
-# Or build directly from the entry points (onefile, console):
-pyinstaller --noconfirm --clean --onefile --name Watchdog      .\src\watchdog.py
-pyinstaller --noconfirm --clean --onefile --name Boot          .\src\boot_main.py
-pyinstaller --noconfirm --clean --onefile --name WindowChecker .\src\window_checker_main.py
+# Or build directly from the entry points (onefile, console) — the SAME five
+# the CI workflow builds:
+pyinstaller --noconfirm --clean --onefile --name Watchdog        .\src\watchdog.py
+pyinstaller --noconfirm --clean --onefile --name Boot            .\src\boot_main.py
+pyinstaller --noconfirm --clean --onefile --name WindowChecker   .\src\window_checker_main.py
+pyinstaller --noconfirm --clean --onefile --name DropStats       .\src\drop_stats_main.py
+pyinstaller --noconfirm --clean --onefile --name MemReductLooped .\src\memreduct_looped.py
 ```
 
 The deploy layout is **one folder per exe** under `WatchdogDeploy\`: `Watchdog\`, `Boot\`, `WindowChecker\`, `DropStats\`, `MemReductLooped\` — each with its own `config\` holding only the yamls that exe reads. Copy each built exe into its folder alongside `config\` (and `third_party\` for Watchdog, which needs Tesseract; the others don't). WindowChecker.exe runs from the **main user session** (`Documents\WindowChecker\`), like Boot.
 
-After building a new release, upload `Watchdog.exe`, `Boot.exe`, **and `WindowChecker.exe`** as GitHub release assets and bump `current_version` in all three of `config/update_config.yaml`, `config/boot_update_config.yaml`, and `config/windowchecker_update_config.yaml` to match the release tag. (Each updater only downloads its own matching asset, but all three read the same `releases/latest` tag — so the tag must exceed every config's `current_version` for all to update.)
+## Releases (CI-on-push)
+
+`.github/workflows/release.yml` publishes releases automatically. A push to
+`main` touching `src/**`, `config/**`, `requirements.txt`, or the workflow
+itself triggers a `windows-latest` job that:
+
+1. Builds all **five** onefile console exes above.
+2. Patch-bumps the latest release tag (`v1.0.21` → `v1.0.22`; `v1.0.0` if none
+   exists yet) and fails cleanly if that tag already exists.
+3. Writes release notes with **one SHA256 line per asset** in this exact form:
+
+   ```
+   SHA256 (Watchdog.exe): <64-hex>
+   SHA256 (Boot.exe): <64-hex>
+   SHA256 (WindowChecker.exe): <64-hex>
+   SHA256 (DropStats.exe): <64-hex>
+   SHA256 (MemReductLooped.exe): <64-hex>
+   ```
+
+   The `(` after `SHA256` is deliberate: it does **not** match the OLD deployed
+   regex `SHA256:\s*([a-fA-F0-9]{64})`, so pre-existing exes skip verification
+   instead of verifying the wrong hash. New exes parse the per-asset named form
+   (`auto_updater.extract_sha256_from_release`), falling back to a single bare
+   `SHA256: <hash>` line for old manual releases.
+4. Attaches all five exes (basenames become the asset names — a **contract**
+   the deployed updaters match by exact `executable_name`; never rename them)
+   and appends the commit SHA + a `git log` changelog since the previous tag.
+
+**No manual upload.** Just push. Bump `current_version` in each app's update
+config only if you want to force-skip a version locally — CI always tags higher
+than the previous release, so deployed apps update on the next poll.
+
+**One-time bootstrap for DropStats / MemReductLooped.** Their *currently
+deployed* copies predate the updater wiring, so they cannot self-update yet.
+The **first** `DropStats.exe` and `MemReductLooped.exe` (built with an updater)
+must be installed by hand into their deploy folders alongside their new
+`config/drop_stats_update_config.yaml` / `config/memreduct_update_config.yaml`.
+After that one manual install they self-update from every subsequent release
+like the other three.
 
 ## Diagnostic / test scripts
 
@@ -114,9 +158,14 @@ Two helpers in `src/utils.py` handle dev vs frozen (PyInstaller) paths:
 
 ## Auto-updater
 
-`src/auto_updater.py` is used by both Watchdog and Boot. Each passes its own config path:
+`src/auto_updater.py` is shared by all five deployed apps. Each passes its own config path:
 - Watchdog: `config/update_config.yaml` (executable_name: `Watchdog.exe`)
 - Boot: `config/boot_update_config.yaml` (executable_name: `Boot.exe`)
+- WindowChecker: `config/windowchecker_update_config.yaml` (executable_name: `WindowChecker.exe`)
+- DropStats: `config/drop_stats_update_config.yaml` (executable_name: `DropStats.exe`) — one-shot weekly job, checks once at startup
+- MemReductLooped: `config/memreduct_update_config.yaml` (executable_name: `MemReductLooped.exe`) — checks at startup + once per ~10-min loop
+
+The updater verifies a downloaded asset against the per-asset `SHA256 (<AssetName>): <hash>` line in the release notes when present (see [Releases](#releases-ci-on-push)); if no hash is found it logs a warning and proceeds without verification.
 
 The updater:
 1. Reads config for repo/version/token/executable_name
