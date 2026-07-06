@@ -148,10 +148,15 @@ def main():
                 "ladder": ladder.state,
                 "ts": datetime.now().isoformat(timespec="seconds")}
 
-    srv = make_api_server(cfg.get("bind", "0.0.0.0"), int(cfg.get("port", 8765)),
-                          str(cfg.get("token", "")), status, executor)
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
-    log.info("API listening on %s:%s", cfg.get("bind", "0.0.0.0"), cfg.get("port", 8765))
+    try:
+        srv = make_api_server(cfg.get("bind", "0.0.0.0"), int(cfg.get("port", 8765)),
+                              str(cfg.get("token", "")), status, executor)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        log.info("API listening on %s:%s", cfg.get("bind", "0.0.0.0"), cfg.get("port", 8765))
+    except ValueError as e:
+        # Fail-closed: no token -> no API. Supervision keeps running; Sherlock
+        # will see this box as unreachable, which IS the correct signal.
+        log.error("API DISABLED: %s", e)
 
     hb_path = os.path.join(exe_dir(), "logs", "farmagent_heartbeat.txt")
     while True:
