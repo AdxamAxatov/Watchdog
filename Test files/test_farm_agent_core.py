@@ -66,5 +66,45 @@ class TestLadder(unittest.TestCase):
         reloaded = EscalationLadder(self.state, clock=self.clock)
         self.assertIn("reboot", reloaded.next_actions(self.unhealthy()))
 
+import http.client, threading
+from farm_agent_core import make_api_server
+
+class TestApi(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.calls = []
+        cls.srv = make_api_server(
+            "127.0.0.1", 0, "sekret",
+            status_provider=lambda: {"box": "test", "ok": True},
+            action_executor=lambda name, arg=None: (cls.calls.append((name, arg)) or {"ran": name}))
+        threading.Thread(target=cls.srv.serve_forever, daemon=True).start()
+        cls.port = cls.srv.server_address[1]
+    @classmethod
+    def tearDownClass(cls):
+        cls.srv.shutdown()
+    def _req(self, method, path, token="sekret", body=None):
+        c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        headers = {"X-Farm-Token": token} if token else {}
+        c.request(method, path, body=body, headers=headers)
+        r = c.getresponse()
+        return r.status, json.loads(r.read() or b"{}")
+    def test_status_ok(self):
+        status, body = self._req("GET", "/status")
+        self.assertEqual(status, 200); self.assertEqual(body["box"], "test")
+    def test_bad_token_401(self):
+        self.assertEqual(self._req("GET", "/status", token="wrong")[0], 401)
+        self.assertEqual(self._req("GET", "/status", token=None)[0], 401)
+    def test_action_dispatch(self):
+        status, body = self._req("POST", "/action/restart-windowchecker")
+        self.assertEqual(status, 200); self.assertEqual(body["ran"], "restart_windowchecker")
+    def test_watchdog_action_carries_user(self):
+        self._req("POST", "/action/restart-watchdog/SinFermera11")
+        self.assertIn(("run_watchdog_task", "SinFermera11"), self.calls)
+    def test_watchdog_action_missing_user_400(self):
+        self.assertEqual(self._req("POST", "/action/restart-watchdog")[0], 400)
+    def test_unknown_404(self):
+        self.assertEqual(self._req("POST", "/action/nuke")[0], 404)
+        self.assertEqual(self._req("GET", "/nope")[0], 404)
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
