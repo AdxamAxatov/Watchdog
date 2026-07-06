@@ -1,0 +1,26 @@
+# FarmAgent per-box config. Fill token + watchdog_users per machine.
+bind: "0.0.0.0"
+port: 8765
+
+# Shared secret checked on every request (header X-Farm-Token).
+# NEVER commit a real value — fill per-box during bootstrap.
+token: ""
+
+# How many RDP session renderers this box should always have.
+expected_sessions: 2
+
+# WindowChecker heartbeat older than this (seconds) = unhealthy.
+wc_heartbeat_max_age_s: 300
+
+# Escalation: reboot after N consecutive unhealthy 60s loops...
+unhealthy_loops_before_reboot: 3
+# ...but never more than one reboot per this many seconds (no boot loops).
+reboot_min_interval_s: 7200
+
+# Task Scheduler task names on this box.
+windowchecker_task: "WindowsChecker"
+
+# Map RDP username -> its Watchdog Task Scheduler task.
+watchdog_users:
+  SinFermera11: "Watchdog11"
+  SinFermera12: "Watchdog12"
