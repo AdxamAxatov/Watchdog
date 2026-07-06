@@ -1,0 +1,32 @@
+# config/farm_agent_update_config.yaml
+# Auto-updater configuration for FarmAgent.exe
+
+# Enable/disable auto-updates
+enabled: true
+
+# GitHub repository info (same repo, FarmAgent.exe is a release asset)
+repo_owner: "AdxamAxatov"
+repo_name: "Watchdog"
+
+# Current version
+current_version: "1.0.0"
+
+# Executable name
+executable_name: "FarmAgent.exe"
+
+# Check interval (hours). 0.0333 ≈ 2 minutes (inner file-guard).
+check_interval_hours: 0.0333
+
+# Silent mode (less logging)
+silent_mode: true
+
+# Task Scheduler task name for restarting after update.
+task_scheduler_name: "FarmAgent"
+
+# Timeouts
+github_api_timeout: 10
+download_timeout: 60
+
+# Per-machine GitHub PAT — optional. Empty = anonymous API (60 req/hr/IP);
+# paste a real token to raise it to 5000 req/hr. NEVER commit a real token.
+github_token: ""
