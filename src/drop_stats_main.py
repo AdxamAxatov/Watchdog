@@ -31,6 +31,23 @@ def _exe_dir() -> str:
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+def _check_update() -> None:
+    """Self-update at startup, then run the report on the fresh build.
+
+    DropStats is a one-shot weekly Task Scheduler job (no long-running loop),
+    so a single startup check is the right cadence — same shape as Boot. When
+    a newer build exists, check_updates() applies it and calls sys.exit(0),
+    which relaunches the updated exe (that then re-runs this flow). Any updater
+    error is swallowed so it can never block the weekly report.
+    """
+    try:
+        from auto_updater import check_updates
+        cfg = os.path.join(_exe_dir(), "config", "drop_stats_update_config.yaml")
+        check_updates(config_path=cfg)
+    except Exception as e:  # never let the updater kill the report run
+        sys.stderr.write(f"DropStatsRunner update check failed: {e}\n")
+
+
 def _write_crash(exc: BaseException, where: str) -> str:
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     candidates = [
@@ -56,6 +73,10 @@ def _write_crash(exc: BaseException, where: str) -> str:
 
 
 def main() -> int:
+    # Self-update before doing any work. If a new build is installed this call
+    # exits the process (SystemExit propagates past the Exception guards below).
+    _check_update()
+
     try:
         from steps.drop_stats import run as drop_stats_run
     except BaseException as e:
