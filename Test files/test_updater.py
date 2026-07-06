@@ -1,235 +1,130 @@
-# """
-# Quick test script to check if update detection works
-# Run this to diagnose update detection issues
-# """
+"""Unit tests for auto_updater SHA256 release-note parsing.
 
-# import sys
-# import os
-# from pathlib import Path
+Covers the per-asset named format written by the CI release workflow, the
+bare single-hash back-compat fallback, ambiguity handling, and — critically —
+that the NEW named format does NOT match the OLD deployed regex
+(`SHA256:\\s*([a-fA-F0-9]{64})`), so old exes skip verification instead of
+verifying the wrong asset's hash and failing.
 
-# # Add parent directory to path
-# sys.path.insert(0, str(Path(__file__).parent))
+auto_updater is cross-platform importable (only stdlib at import time), so this
+runs under a plain python3 on any OS:
 
-# from auto_updater import GitHubAutoUpdater
-
-# def test_update_detection():
-#     print("="*70)
-#     print("UPDATE DETECTION TEST")
-#     print("="*70)
-    
-#     # Create updater
-#     updater = GitHubAutoUpdater()
-    
-#     if not updater.enabled:
-#         print("❌ Auto-updater is DISABLED")
-#         print("   Check: update_config.yaml has 'enabled: true'")
-#         return
-    
-#     print(f"✅ Auto-updater enabled")
-#     print(f"   Repo: {updater.repo_owner}/{updater.repo_name}")
-#     print(f"   Current version: {updater.current_version}")
-#     print(f"   Executable: {updater.executable_name}")
-#     print()
-    
-#     # Check if .last_check exists
-#     if updater.last_check_file.exists():
-#         import time
-#         last_check = updater.last_check_file.stat().st_mtime
-#         hours_since = (time.time() - last_check) / 3600
-#         print(f"⚠️  Last check: {hours_since:.2f} hours ago")
-#         print(f"   Interval: {updater.check_interval_hours} hour(s)")
-        
-#         if hours_since < updater.check_interval_hours:
-#             print(f"   ❌ Too soon to check again!")
-#             print(f"   Delete: {updater.last_check_file}")
-#             print(f"   Then run again")
-            
-#             # Offer to delete
-#             response = input("\n   Delete .last_check and force check now? (y/n): ")
-#             if response.lower() == 'y':
-#                 updater.last_check_file.unlink()
-#                 print("   ✅ Deleted! Checking now...")
-#             else:
-#                 return
-    
-#     print()
-#     print("Fetching latest release from GitHub...")
-    
-#     # Get latest release
-#     release = updater.get_latest_release()
-    
-#     if not release:
-#         print("❌ Failed to fetch release from GitHub")
-#         print("   Possible issues:")
-#         print("   - No internet connection")
-#         print("   - GitHub is down")
-#         print("   - No releases published")
-#         print("   - Rate limited (add github_token)")
-#         return
-    
-#     latest_version = release['version']
-#     print(f"✅ GitHub latest version: {latest_version}")
-#     print()
-    
-#     # Version comparison
-#     is_newer = updater.version_is_newer(latest_version)
-#     print(f"Version comparison:")
-#     print(f"   Current: {updater.current_version}")
-#     print(f"   GitHub:  {latest_version}")
-#     print(f"   Newer?   {is_newer}")
-#     print()
-    
-#     if not is_newer:
-#         print("✅ Already up to date - no update needed")
-#         return
-    
-#     # Check for matching asset
-#     print("Checking for Watchdog.exe in release assets...")
-#     asset = updater.find_matching_asset(release['assets'])
-    
-#     if not asset:
-#         print(f"❌ No matching executable found!")
-#         print(f"   Looking for: {updater.executable_name}")
-#         print(f"   Assets in release:")
-#         for a in release['assets']:
-#             print(f"      - {a['name']}")
-#         return
-    
-#     print(f"✅ Found: {asset['name']}")
-#     print(f"   Size: {asset['size']:,} bytes")
-#     print(f"   URL: {asset['url'][:50]}...")
-#     print()
-    
-#     # SHA256 check
-#     sha256 = updater.extract_sha256_from_release(release.get('body', ''))
-#     if sha256:
-#         print(f"✅ SHA256 found in release notes")
-#         print(f"   {sha256}")
-#     else:
-#         print(f"⚠️  No SHA256 in release notes (will skip verification)")
-    
-#     print()
-#     print("="*70)
-#     print("RESULT: Update should be detected!")
-#     print("="*70)
-#     print()
-#     print("To trigger actual update:")
-#     print("1. Run Watchdog.exe")
-#     print("2. Should see: 'Update available: v{updater.current_version} -> v{latest_version}'")
-#     print("3. Will download and install automatically")
-
-# if __name__ == "__main__":
-#     try:
-#         test_update_detection()
-#     except Exception as e:
-#         print(f"\n❌ Error: {e}")
-#         import traceback
-#         traceback.print_exc()
-
-
-# """
-# Full diagnostic - run this to see exactly what's happening
-# """
-
-# import sys
-# from pathlib import Path
-
-# # Add to path
-# sys.path.insert(0, str(Path.cwd() / "src"))
-
-# from auto_updater import GitHubAutoUpdater
-
-# print("="*70)
-# print("FULL UPDATE DIAGNOSTIC")
-# print("="*70)
-
-# updater = GitHubAutoUpdater()
-
-# if not updater.enabled:
-#     print("\n❌ Auto-updater DISABLED")
-#     print("Check: config/update_config.yaml has 'enabled: true'")
-#     sys.exit(1)
-
-# print(f"\n✅ Auto-updater enabled")
-# print(f"   Repo: {updater.repo_owner}/{updater.repo_name}")
-# print(f"   Current version: {updater.current_version}")
-# print(f"   Executable: {updater.executable_name}")
-
-# # Force check (ignore interval)
-# print("\n" + "="*70)
-# print("FORCING UPDATE CHECK (ignoring interval)")
-# print("="*70)
-
-# result = updater.check_and_update(force=True)
-
-# print(f"\nResult:")
-# print(f"  checked: {result.get('checked')}")
-# print(f"  current_version: {result.get('current_version')}")
-# print(f"  latest_version: {result.get('latest_version')}")
-# print(f"  update_available: {result.get('update_available')}")
-# print(f"  downloaded: {result.get('downloaded')}")
-# print(f"  ready_to_apply: {result.get('ready_to_apply')}")
-# print(f"  error: {result.get('error')}")
-
-# if result.get('error'):
-#     print(f"\n❌ ERROR: {result['error']}")
-    
-#     if 'Interval' in result['error']:
-#         print("   This shouldn't happen with force=True!")
-#     elif 'Failed to fetch' in result['error']:
-#         print("   Check internet connection")
-#         print("   Or GitHub API might be down")
-#     elif 'No asset' in result['error']:
-#         print("   GitHub release doesn't have Watchdog.exe")
-#     elif 'Verification failed' in result['error']:
-#         print("   Downloaded file is corrupted or wrong size")
-    
-# elif result.get('update_available'):
-#     print(f"\n✅ Update available: {result['current_version']} -> {result['latest_version']}")
-    
-#     if result.get('downloaded'):
-#         print("✅ Downloaded successfully")
-        
-#         if result.get('ready_to_apply'):
-#             print("✅ Update should have started!")
-#             print("\n⚠️  If you see this message, the update script didn't exit properly")
-#             print("   The update helper script should have been launched")
-            
-#             # Check if helper script exists
-#             helper = updater.temp_dir / "update_helper.py"
-#             if helper.exists():
-#                 print(f"\n   Helper script exists: {helper}")
-#                 print("   Try running it manually:")
-#                 print(f"   python {helper}")
-#             else:
-#                 print(f"\n   ❌ Helper script NOT found at: {helper}")
-#         else:
-#             print("❌ Failed to apply update")
-#     else:
-#         print("❌ Download failed")
-        
-# elif result.get('checked'):
-#     print(f"\n✅ Already up to date: v{result['current_version']}")
-# else:
-#     print("\n❌ Update check didn't run")
-
-# print("\n" + "="*70)
-
-# test_check.py
+    python3 "Test files/test_updater.py"
+"""
+import re
 import sys
-sys.path.insert(0, 'src')
+import unittest
+from pathlib import Path
 
-from auto_updater import GitHubAutoUpdater
+_SRC = Path(__file__).resolve().parent.parent / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
 
-updater = GitHubAutoUpdater()
-print(f"Enabled: {updater.enabled}")
-print(f"Current version: {updater.current_version}")
+from auto_updater import GitHubAutoUpdater  # noqa: E402
 
-# Force check
-result = updater.check_and_update(force=True)
+# The exact regex baked into OLD deployed exes.
+OLD_REGEX = re.compile(r'SHA256:\s*([a-fA-F0-9]{64})', re.IGNORECASE)
 
-print(f"\nResult:")
-print(f"  Checked: {result.get('checked')}")
-print(f"  Latest version: {result.get('latest_version')}")
-print(f"  Update available: {result.get('update_available')}")
-print(f"  Error: {result.get('error')}")
+H_WATCHDOG = "a" * 64
+H_BOOT = "b" * 64
+H_WINDOW = "c" * 64
+H_DROP = "d" * 64
+H_MEM = "e" * 64
+H_BARE = "f" * 64
+
+
+def _named_notes() -> str:
+    """A realistic multi-asset release body as the workflow writes it."""
+    return (
+        "Automated release built from commit deadbeef.\n"
+        "\n"
+        "## Checksums\n"
+        f"SHA256 (Watchdog.exe): {H_WATCHDOG}\n"
+        f"SHA256 (Boot.exe): {H_BOOT}\n"
+        f"SHA256 (WindowChecker.exe): {H_WINDOW}\n"
+        f"SHA256 (DropStats.exe): {H_DROP}\n"
+        f"SHA256 (MemReductLooped.exe): {H_MEM}\n"
+        "\n"
+        "## Changes\n"
+        "- 1234abc some commit\n"
+    )
+
+
+def _updater() -> GitHubAutoUpdater:
+    # Bypass __init__ (config load / dependency checks) — extract_sha256 is a
+    # pure function of its arguments and needs no instance state.
+    return GitHubAutoUpdater.__new__(GitHubAutoUpdater)
+
+
+class TestSha256Parsing(unittest.TestCase):
+    def setUp(self):
+        self.u = _updater()
+
+    def test_named_single_asset(self):
+        body = f"SHA256 (Watchdog.exe): {H_WATCHDOG}\n"
+        self.assertEqual(self.u.extract_sha256_from_release(body, "Watchdog.exe"), H_WATCHDOG)
+
+    def test_named_picks_the_right_asset(self):
+        body = _named_notes()
+        self.assertEqual(self.u.extract_sha256_from_release(body, "Watchdog.exe"), H_WATCHDOG)
+        self.assertEqual(self.u.extract_sha256_from_release(body, "Boot.exe"), H_BOOT)
+        self.assertEqual(self.u.extract_sha256_from_release(body, "WindowChecker.exe"), H_WINDOW)
+        self.assertEqual(self.u.extract_sha256_from_release(body, "DropStats.exe"), H_DROP)
+        self.assertEqual(self.u.extract_sha256_from_release(body, "MemReductLooped.exe"), H_MEM)
+
+    def test_named_case_insensitive_and_flexible_whitespace(self):
+        body = f"sha256(  Watchdog.exe )  :   {H_WATCHDOG.upper()}\n"
+        self.assertEqual(self.u.extract_sha256_from_release(body, "watchdog.exe"), H_WATCHDOG)
+
+    def test_named_missing_asset_no_bare_returns_none(self):
+        # Named block present but not for the asset we're updating, and no bare
+        # line to fall back on.
+        body = f"SHA256 (Boot.exe): {H_BOOT}\n"
+        self.assertIsNone(self.u.extract_sha256_from_release(body, "Watchdog.exe"))
+
+    def test_bare_single_fallback_with_asset_name(self):
+        # Manual single-hash release; the asset we want has no named line.
+        body = f"Release notes\nSHA256: {H_BARE}\n"
+        self.assertEqual(self.u.extract_sha256_from_release(body, "Watchdog.exe"), H_BARE)
+
+    def test_bare_single_fallback_without_asset_name(self):
+        body = f"SHA256: {H_BARE}\n"
+        self.assertEqual(self.u.extract_sha256_from_release(body, None), H_BARE)
+
+    def test_ambiguous_multiple_bare_returns_none(self):
+        body = f"SHA256: {H_BARE}\nSHA256: {H_BOOT}\n"
+        self.assertIsNone(self.u.extract_sha256_from_release(body, "Watchdog.exe"))
+
+    def test_named_present_does_not_count_as_bare(self):
+        # The named multi-asset body must yield ZERO bare matches, so a
+        # non-listed asset falls through to None (not a bogus bare pick).
+        body = _named_notes()
+        self.assertIsNone(self.u.extract_sha256_from_release(body, "Missing.exe"))
+
+    def test_empty_body(self):
+        self.assertIsNone(self.u.extract_sha256_from_release("", "Watchdog.exe"))
+        self.assertIsNone(self.u.extract_sha256_from_release(None, "Watchdog.exe"))
+
+
+class TestOldRegexCompat(unittest.TestCase):
+    """The compat contract: OLD exes' regex must NOT match the NEW named form."""
+
+    def test_old_regex_does_not_match_named_format(self):
+        body = _named_notes()
+        self.assertIsNone(
+            OLD_REGEX.search(body),
+            "OLD regex matched the NEW named format — old exes would verify the "
+            "wrong hash and fail. The '(' after SHA256 must break the match.",
+        )
+
+    def test_old_regex_still_matches_bare_format(self):
+        # Sanity: the old regex still works on the old single-hash format, so
+        # manual releases stay backward compatible for old exes.
+        body = f"SHA256: {H_BARE}\n"
+        m = OLD_REGEX.search(body)
+        self.assertIsNotNone(m)
+        self.assertEqual(m.group(1).lower(), H_BARE)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

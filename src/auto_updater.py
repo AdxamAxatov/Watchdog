@@ -246,16 +246,41 @@ class GitHubAutoUpdater:
         
         return None
     
-    def extract_sha256_from_release(self, release_body: str) -> Optional[str]:
-        """FIXED Issue #6: Extract SHA256 from release notes"""
+    def extract_sha256_from_release(self, release_body: str,
+                                    asset_name: Optional[str] = None) -> Optional[str]:
+        """Extract this asset's SHA256 from release notes.
+
+        Precedence:
+          1. Per-asset named form ``SHA256 (<AssetName>): <hash>`` — the format
+             the CI release workflow writes, one line per asset (case-insensitive,
+             flexible whitespace).
+          2. Back-compat: exactly ONE bare ``SHA256: <hash>`` line in the body
+             (manual single-hash releases from before multi-asset notes).
+          3. Otherwise None → caller skips verification.
+
+        Note the named form is intentionally NOT matched by the bare pattern
+        (the ``(`` after ``SHA256`` breaks ``SHA256\\s*:``), so a multi-asset
+        release yields zero bare matches and never false-positives here.
+        """
         if not release_body:
             return None
-        
-        # Look for SHA256: abc123... or sha256: abc123...
-        match = re.search(r'SHA256:\s*([a-fA-F0-9]{64})', release_body, re.IGNORECASE)
-        if match:
-            return match.group(1).lower()
-        
+
+        # 1) Per-asset named form: SHA256 (AssetName): <hash>
+        if asset_name:
+            named = re.search(
+                r'SHA256\s*\(\s*' + re.escape(asset_name) + r'\s*\)\s*:\s*([a-fA-F0-9]{64})',
+                release_body,
+                re.IGNORECASE,
+            )
+            if named:
+                return named.group(1).lower()
+
+        # 2) Back-compat: exactly one bare "SHA256: <hash>" in the whole body.
+        bare = re.findall(r'SHA256\s*:\s*([a-fA-F0-9]{64})', release_body, re.IGNORECASE)
+        if len(bare) == 1:
+            return bare[0].lower()
+
+        # 3) No named match; zero or ambiguous bare hashes → don't verify.
         return None
     
     def version_is_newer(self, latest: str) -> bool:
@@ -560,8 +585,8 @@ exit
             result['error'] = f'No matching asset for {self.executable_name}'
             return result
         
-        # FIXED Issue #6: Extract SHA256 from release notes
-        expected_sha256 = self.extract_sha256_from_release(release.get('body', ''))
+        # FIXED Issue #6: Extract SHA256 from release notes (per-asset aware)
+        expected_sha256 = self.extract_sha256_from_release(release.get('body', ''), asset['name'])
         if expected_sha256:
             logger.info("SHA256 found in release notes - will verify")
         else:
