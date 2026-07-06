@@ -58,6 +58,7 @@ jobs:
           pyinstaller --noconfirm --clean --onefile --name WindowChecker   src/window_checker_main.py
           pyinstaller --noconfirm --clean --onefile --name DropStats       src/drop_stats_main.py
           pyinstaller --noconfirm --clean --onefile --name MemReductLooped src/memreduct_looped.py
+          pyinstaller --noconfirm --clean --onefile --name FarmAgent       src/farm_agent_main.py
           ls -la dist/
 
       - name: Compute tag, write notes, and publish release
@@ -106,7 +107,7 @@ jobs:
           # The "(" after SHA256 deliberately breaks the OLD deployed regex
           # `SHA256:\s*([a-fA-F0-9]{64})` so pre-existing exes skip
           # verification instead of failing it. New exes parse the named form.
-          assets=(Watchdog Boot WindowChecker DropStats MemReductLooped)
+          assets=(Watchdog Boot WindowChecker DropStats MemReductLooped FarmAgent)
           notes_file="$(mktemp)"
           {
             echo "Automated release built from commit ${GITHUB_SHA}."
@@ -145,4 +146,5 @@ jobs:
             dist/Boot.exe \
             dist/WindowChecker.exe \
             dist/DropStats.exe \
-            dist/MemReductLooped.exe
+            dist/MemReductLooped.exe \
+            dist/FarmAgent.exe

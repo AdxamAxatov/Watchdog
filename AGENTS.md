@@ -38,9 +38,10 @@ pyinstaller --noconfirm --clean --onefile --name Boot            .\src\boot_main
 pyinstaller --noconfirm --clean --onefile --name WindowChecker   .\src\window_checker_main.py
 pyinstaller --noconfirm --clean --onefile --name DropStats       .\src\drop_stats_main.py
 pyinstaller --noconfirm --clean --onefile --name MemReductLooped .\src\memreduct_looped.py
+pyinstaller --noconfirm --clean --onefile --name FarmAgent       .\src\farm_agent_main.py
 ```
 
-The deploy layout is **one folder per exe** under `WatchdogDeploy\`: `Watchdog\`, `Boot\`, `WindowChecker\`, `DropStats\`, `MemReductLooped\` — each with its own `config\` holding only the yamls that exe reads. Copy each built exe into its folder alongside `config\` (and `third_party\` for Watchdog, which needs Tesseract; the others don't). WindowChecker.exe runs from the **main user session** (`Documents\WindowChecker\`), like Boot.
+The deploy layout is **one folder per exe** under `WatchdogDeploy\`: `Watchdog\`, `Boot\`, `WindowChecker\`, `DropStats\`, `MemReductLooped\`, `FarmAgent\` — each with its own `config\` holding only the yamls that exe reads. Copy each built exe into its folder alongside `config\` (and `third_party\` for Watchdog, which needs Tesseract; the others don't). WindowChecker.exe runs from the **main user session** (`Documents\WindowChecker\`), like Boot.
 
 ## Releases (CI-on-push)
 
@@ -100,7 +101,7 @@ Run any of them with: `venv\Scripts\python "Test files\<script>.py"`
 
 ## Architecture
 
-The project has three independent executables:
+The project has four main independent executables (plus DropStats/MemReductLooped utilities):
 
 **Watchdog** (`src/main.py` → `src/watchdog.py`)
 - Finds a target panel window by title substring (`config/app.yaml` → `window.title_substring`)
@@ -125,6 +126,13 @@ The project has three independent executables:
 - Self-update check every 2 min (`UPDATE_CHECK_INTERVAL=120`) + at startup, via `config/windowchecker_update_config.yaml`
 - Writes heartbeat `windowchecker_heartbeat_<user>.txt`; health_check.bat restarts it on hang
 - Does **not** need Tesseract/OpenCV/NumPy — pure Win32 + pyautogui clicks
+- Recovery hardening (R1–R6): probes every hwnd with `winops.window_responsive` before touching it (a frozen renderer deadlocked the checker on 7/4 + 7/6), repositions with `SWP_ASYNCWINDOWPOS`, confirms a disconnect by **observed effect** (success dialog or old window destroyed — `recovery_rules.disconnect_confirmed`), waits for session teardown before reopening (`regions.yaml → rdp_windows.disconnect_settle_max_s` / `reopen_settle_s`), and only ever force-kills allowlisted images (`wfreerdp.exe`; ghost hwnds resolved so dwm.exe is never targeted). Single-instance mutex; `focus_interval_minutes` floored at 10.
+
+**FarmAgent** (`src/farm_agent_main.py`) — **box supervisor + HTTP control plane**
+- Runs from the **main user session**, own Task Scheduler tasks: `FarmAgent` (at logon) + `FarmAgentKeepAlive` (every 10 min, start-if-not-running)
+- Stdlib-only (no pywin32/requests): 60s loop reads WindowChecker heartbeat age, process/renderer/watchdog counts (`tasklist`), then walks a persisted escalation ladder — restart WindowChecker task → run missing Watchdog tasks → **auto-reboot** (after 3 consecutive unhealthy loops, max 1 reboot / 2h)
+- HTTP API for Sherlock Homeless (config `config/farm_agent_config.yaml`: bind/port/token; header `X-Farm-Token`): `GET /status` (JSON health snapshot + recent actions), `POST /action/restart-windowchecker`, `POST /action/restart-watchdog/<user>`, `POST /action/run-health-check`, `POST /action/reboot`. Sherlock treats a `/status` timeout as the alert — the agent needs no outbound connectivity
+- Self-updates via `config/farm_agent_update_config.yaml` (asset `FarmAgent.exe`)
 
 ## Key files
 
