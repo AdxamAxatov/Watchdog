@@ -1,0 +1,38 @@
+# config/drop_stats_update_config.yaml
+# Auto-updater configuration for DropStats.exe
+
+# Enable/disable auto-updates
+enabled: true
+
+# GitHub repository info (same repo, DropStats.exe is a release asset)
+repo_owner: "AdxamAxatov"
+repo_name: "Watchdog"
+
+# Current version
+current_version: "1.0.0"
+
+# Executable name (must match the release asset name exactly)
+executable_name: "DropStats.exe"
+
+# Check interval (hours). 0.0333 ≈ 2 minutes. DropStats is a one-shot weekly
+# task, so this only throttles repeated in-process checks; each scheduled run
+# is far past the interval and always checks once at startup.
+check_interval_hours: 0.0333
+
+# Silent mode (less logging)
+silent_mode: true
+
+# Backup old version before update
+backup_old_version: false
+
+# Task Scheduler task name for restarting after update.
+# Set this per-PC to DropStats' own task so the updater can relaunch it.
+task_scheduler_name: ""
+
+# Timeouts
+github_api_timeout: 10
+download_timeout: 60
+
+# Per-machine GitHub PAT — optional. Empty = anonymous API (60 req/hr/IP);
+# paste a real token to raise it to 5000 req/hr. NEVER commit a real token.
+github_token: ""
