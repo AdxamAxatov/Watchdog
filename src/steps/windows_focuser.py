@@ -215,14 +215,19 @@ def _session_present(sess_title, window_titles):
 
 
 def _force_kill_window_process(hwnd, title, log=None):
-    """Force-kill the process owning `hwnd` (taskkill /F /T /PID). Used when a
-    WM_CLOSE was ignored — i.e. the window is genuinely FROZEN (the not-responding
-    case). Killing the process is the deterministic equivalent of clicking
-    'Close the program' -> 'Cancel' through the WER dialogs, and avoids them.
-    Returns True if the kill command ran.
-    """
+    """Force-kill the FROZEN renderer owning `hwnd` — only if the owning image
+    is allowlisted (wfreerdp.exe). Ghost hwnds are resolved first so we never
+    target dwm.exe (R4). Returns True if the kill command ran."""
+    from winops import resolve_real_hwnd, process_image_of
+    from recovery_rules import may_kill_process
+    real = resolve_real_hwnd(hwnd)
+    image = process_image_of(real)
+    if not may_kill_process(image):
+        if log:
+            log.error("Force-kill REFUSED for %s — owning image %r not allowlisted", title, image)
+        return False
     try:
-        _, pid = win32process.GetWindowThreadProcessId(hwnd)
+        _, pid = win32process.GetWindowThreadProcessId(real)
     except Exception as e:
         if log:
             log.error("Force-kill: could not get PID for %s: %s", title, e)
@@ -235,13 +240,26 @@ def _force_kill_window_process(hwnd, title, log=None):
         subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
                        capture_output=True, text=True, timeout=15)
         if log:
-            log.warning("Force-killed FROZEN window %s (pid=%d) — WM_CLOSE was ignored", title, pid)
+            log.warning("Force-killed FROZEN %s (image=%s pid=%d)", title, image, pid)
         print(f"   !! Force-killed FROZEN window: {title} (pid={pid})")
         return True
     except Exception as e:
         if log:
             log.error("Force-kill taskkill failed for %s (pid=%d): %s", title, pid, e)
         return False
+
+
+def write_recovery_breadcrumb(session, state):
+    """Append a JSON line to logs/recovery_state.json for FarmAgent /status."""
+    import json
+    try:
+        path = os.path.join(exe_dir(), "logs", "recovery_state.json")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+                                "session": session, "state": state}) + "\n")
+    except Exception:
+        pass
 
 
 def _clear_wer_dialogs(log=None):
@@ -315,11 +333,19 @@ def reposition_rdp_windows_to_corners(windows, log=None):
                 log.warning("Reposition failed for %s: %s", title, e)
 
 
-def reconnect_stuck_session(entry_pct, disconnect_pct, log=None):
-    """Recover a session that didn't reopen, via the RDP Session Manager UI:
-    select its entry -> click Disconnect -> re-open it. All click points are
-    percentages of the RDP Session Manager window's client area (resolved live
-    from its hwnd, so its on-screen position doesn't matter).
+def reconnect_stuck_session(entry_pct, disconnect_pct, old_hwnd=None, log=None,
+                            settle_max_s=10.0, reopen_settle_s=3.0):
+    """Cycle a session via the RDP Session Manager UI with EFFECT CONFIRMATION:
+    select its entry -> click Disconnect -> WAIT for the server-side teardown
+    (old window destroyed, polled up to settle_max_s) -> settle reopen_settle_s
+    -> re-open. Returns a dict {"ran", "dialog_seen", "old_destroyed"}; callers
+    must gate frozen-kill eligibility on recovery_rules.disconnect_confirmed
+    (R2+R3 — reopening ~1.5s after Disconnect raced the session arbitration and
+    birthed frozen renderers; click dispatch alone proved nothing when the
+    manager itself was hung).
+
+    All click points are percentages of the RDP Session Manager window's client
+    area (resolved live from its hwnd, so its on-screen position doesn't matter).
 
     RDPClient pops a "Success" confirmation dialog ("Session '...' disconnected")
     after EVERY click, so each click is followed by close_confirmation_dialog()
@@ -330,18 +356,30 @@ def reconnect_stuck_session(entry_pct, disconnect_pct, log=None):
       - disconnect    : single click (top toolbar button)
       - reconnect     : double click (same action the launcher uses to start)
 
-    Returns True if the sequence ran, False if the manager wasn't found/focusable
-    (in which case the host is likely down and the caller's relaunch path covers it).
+    Result dict is all-False if the manager wasn't found, is hung, or couldn't
+    be focused (host down / manager frozen — caller's escalation covers both).
     """
-    from winops import find_window, force_foreground, pct_to_screen_xy, safe_click, safe_double_click
+    from winops import (find_window, force_foreground, pct_to_screen_xy,
+                        safe_click, safe_double_click, window_responsive)
     from steps.rdp import close_confirmation_dialog
+
+    result = {"ran": False, "dialog_seen": False, "old_destroyed": False}
 
     RDP_MANAGER_TITLE = "RDP Session Manager"
     m = find_window(RDP_MANAGER_TITLE, require_visible=True)
     if not m:
         if log:
             log.warning("Reconnect: '%s' window not found — skipping (host may be down)", RDP_MANAGER_TITLE)
-        return False
+        return result
+    # A hung manager still accepts focus but eats clicks — don't fire blind
+    # clicks into a dead message queue (observed on host-67; the phantom
+    # "confirmed" disconnects then ghost-killed healthy renderers).
+    if not window_responsive(m.hwnd):
+        if log:
+            log.error("Reconnect: RDP Session Manager NOT RESPONDING — skipping clicks "
+                      "(FarmAgent/host relaunch path owns this)")
+        write_recovery_breadcrumb("rdp-session-manager", "manager-hung")
+        return result
 
     def _click_then_confirm(label, click_fn, pct):
         # RESTORE + focus the manager BEFORE reading its rect. A minimized window
@@ -356,38 +394,53 @@ def reconnect_stuck_session(entry_pct, disconnect_pct, log=None):
         if not force_foreground(m.hwnd, tries=6, sleep_s=0.2):
             if log:
                 log.warning("Reconnect: could not focus RDP Session Manager before %s — skipping", label)
-            return False
+            return False, False
         time.sleep(0.25)
         x, y = pct_to_screen_xy(m.hwnd, float(pct["x"]), float(pct["y"]))
         if x < 0 or y < 0:
             if log:
                 log.warning("Reconnect: %s target off-screen (%d, %d) — window not restored; skipping", label, x, y)
-            return False
+            return False, False
         if log:
             log.info("Reconnect: %s at (%d, %d)", label, x, y)
         click_fn(x, y)
         time.sleep(0.4)
         # Dismiss the "Success" dialog this click spawns (short appear-timeout
         # so a click that happens not to spawn one doesn't stall the sequence).
+        # Its return value is EVIDENCE: dialog seen == the manager reacted.
+        dialog_seen = False
         try:
-            close_confirmation_dialog(hwnd=m.hwnd, verbose=False, appear_timeout_s=2.5)
+            dialog_seen = bool(close_confirmation_dialog(
+                hwnd=m.hwnd, verbose=False, appear_timeout_s=2.5))
         except Exception as e:
             if log:
                 log.warning("Reconnect: dialog handling failed after %s: %s", label, e)
-        return True
+        return True, dialog_seen
 
     # If we can't even select the entry (window won't restore/focus), abort —
     # don't fire blind clicks. The caller's host-relaunch path still covers the
     # fully-dead case.
-    if not _click_then_confirm("select entry", safe_click, entry_pct):
-        return False
-    # Disconnect must also be confirmed-clicked: callers use a True return as
-    # proof the session WAS disconnected (the reconnect cycle ghost-kills any
-    # old window that survives it). A focus failure here must read as False.
-    if not _click_then_confirm("click Disconnect", safe_click, disconnect_pct):
-        return False
+    ok, _ = _click_then_confirm("select entry", safe_click, entry_pct)
+    if not ok:
+        return result
+    ok, dlg = _click_then_confirm("click Disconnect", safe_click, disconnect_pct)
+    if not ok:
+        return result
+    result["ran"] = True
+    result["dialog_seen"] = bool(dlg)
+    # R2: respect the server-side teardown — wait for the OLD window to die
+    # before reopening (reopening ~1.5s after Disconnect raced the session
+    # arbitration; LSM showed arbitration ending ~8s after the old timing).
+    if old_hwnd:
+        deadline = time.time() + float(settle_max_s)
+        while time.time() < deadline:
+            if not win32gui.IsWindow(old_hwnd):
+                result["old_destroyed"] = True
+                break
+            time.sleep(0.5)
+    time.sleep(float(reopen_settle_s))
     _click_then_confirm("re-open entry (double-click)", safe_double_click, entry_pct)
-    return True
+    return result
 
 
 def _sleep_with_beat(total_seconds, beat=None, chunk=10):
@@ -441,6 +494,8 @@ def cycle_or_recover_rdp_windows(title_search="SinFermera", log=None, beat=None)
     cfg = load_yaml("config/regions.yaml")
     rdp_cfg = cfg.get("rdp_windows", {}) or {}
     reopen_wait = float(rdp_cfg.get("reopen_wait_seconds", 15))
+    settle_max = float(rdp_cfg.get("disconnect_settle_max_s", 10))   # R2
+    reopen_settle = float(rdp_cfg.get("reopen_settle_s", 3))          # R2
 
     rdp_ui = cfg.get("rdp", {}) or {}
     disconnect_pct = rdp_ui.get("disconnect_point_pct")
@@ -471,21 +526,32 @@ def cycle_or_recover_rdp_windows(title_search="SinFermera", log=None, beat=None)
             log.info("Reconnect cycle: disconnect+reconnect %d session(s) via Session Manager",
                      len(configured_sessions))
         print(f"   Reconnect cycle: {len(configured_sessions)} session(s) via Session Manager")
-        cycled_titles = []  # sessions whose Disconnect was CONFIRMED clicked
+        from recovery_rules import disconnect_confirmed
+        cycled_titles = []  # sessions whose Disconnect was CONFIRMED by effect (R3)
         for sess_title, entry_pct in configured_sessions:
             if beat:
                 try:
                     beat()
                 except Exception:
                     pass
+            old_hwnd = next((h for h, t in windows
+                             if _title_matches_session(t, sess_title)), None)
             try:
-                if reconnect_stuck_session(entry_pct, disconnect_pct, log=log):
+                r = reconnect_stuck_session(entry_pct, disconnect_pct, old_hwnd=old_hwnd,
+                                            log=log, settle_max_s=settle_max,
+                                            reopen_settle_s=reopen_settle)
+                if disconnect_confirmed(r["dialog_seen"], r["old_destroyed"]):
                     cycled_titles.append(sess_title)
                     closed_count += 1
+                elif r["ran"]:
+                    if log:
+                        log.warning("Disconnect DISPATCHED but UNCONFIRMED for %r — "
+                                    "not eligible for frozen-kill (manager hung?)", sess_title)
+                    print(f"   !! Disconnect unconfirmed for {sess_title}")
                 else:
                     if log:
                         log.warning("Reconnect cycle: sequence did not complete for %r "
-                                    "(manager missing or focus failed)", sess_title)
+                                    "(manager missing/hung or focus failed)", sess_title)
                     print(f"   !! Reconnect sequence did not complete for {sess_title}")
             except Exception:
                 if log:
@@ -539,6 +605,33 @@ def cycle_or_recover_rdp_windows(title_search="SinFermera", log=None, beat=None)
 
     reappeared = find_rdp_windows(title_search)
 
+    # (b3) R5: a window that reopened FROZEN gets one kill+reconnect retry,
+    # then a breadcrumb for FarmAgent/Sherlock. Prevents carrying a dead-on-
+    # arrival renderer into reposition/next cycle.
+    from winops import window_responsive
+    for hwnd, title in list(reappeared):
+        if window_responsive(hwnd):
+            continue
+        if log:
+            log.warning("Post-reopen: %s NOT RESPONDING — kill + retry", title)
+        print(f"   !! Post-reopen frozen: {title}")
+        if _force_kill_window_process(hwnd, title, log=log):
+            base = _base_title(title)
+            sess = next(((st, ep) for st, ep in configured_sessions
+                         if _title_matches_session(title, st)), None)
+            if sess and disconnect_pct:
+                try:
+                    reconnect_stuck_session(sess[1], disconnect_pct, log=log,
+                                            settle_max_s=settle_max,
+                                            reopen_settle_s=reopen_settle)
+                except Exception:
+                    if log:
+                        log.exception("R5 retry failed for %r", base)
+            write_recovery_breadcrumb(base, "frozen-after-reopen")
+            if base not in hung_titles:
+                hung_titles.append(base)
+    reappeared = find_rdp_windows(title_search)
+
     # (d2) Both windows are back and healthy — snap them into the two opposite
     # desktop corners (top-left + bottom-right). Runs every cycle so the windows
     # always end up in a known position after the close/reopen.
@@ -577,7 +670,9 @@ def cycle_or_recover_rdp_windows(title_search="SinFermera", log=None, beat=None)
                 except Exception:
                     pass
             try:
-                reconnect_stuck_session(entry_pct, disconnect_pct, log=log)
+                reconnect_stuck_session(entry_pct, disconnect_pct, log=log,
+                                        settle_max_s=settle_max,
+                                        reopen_settle_s=reopen_settle)
             except Exception:
                 if log:
                     log.exception("reconnect_stuck_session failed for %r", sess_title)
