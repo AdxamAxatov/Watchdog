@@ -7,5 +7,4 @@ pyautogui
 pyyaml
 psutil
 pywinauto
-
-
+requests

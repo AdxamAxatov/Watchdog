@@ -42,6 +42,13 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt pyinstaller
 
+      - name: Guard - updater deps must be importable in the build env
+        # If requests/yaml are missing here, PyInstaller silently ships exes
+        # whose auto-updater is DISABLED (observed live on host-67: a deployed
+        # WindowChecker built without requests could never self-update again).
+        shell: bash
+        run: python -c "import requests, yaml; print('updater deps ok')"
+
       - name: Build executables (onefile console)
         shell: bash
         run: |
