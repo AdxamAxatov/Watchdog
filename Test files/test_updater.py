@@ -126,5 +126,37 @@ class TestOldRegexCompat(unittest.TestCase):
         self.assertEqual(m.group(1).lower(), H_BARE)
 
 
+class TestTokenSanitization(unittest.TestCase):
+    """A placeholder token must never reach the Authorization header — GitHub
+    answers 401 to a bad token, killing the update check entirely (strictly
+    worse than the anonymous 60 req/hr with no header)."""
+
+    def test_placeholder_is_ignored(self):
+        self.assertIsNone(GitHubAutoUpdater._sanitize_token("PASTE_NEW_GITHUB_TOKEN_HERE"))
+
+    def test_empty_and_none_are_ignored(self):
+        self.assertIsNone(GitHubAutoUpdater._sanitize_token(""))
+        self.assertIsNone(GitHubAutoUpdater._sanitize_token("   "))
+        self.assertIsNone(GitHubAutoUpdater._sanitize_token(None))
+
+    def test_short_garbage_is_ignored(self):
+        self.assertIsNone(GitHubAutoUpdater._sanitize_token("changeme"))
+
+    def test_token_with_spaces_is_ignored(self):
+        self.assertIsNone(GitHubAutoUpdater._sanitize_token("paste token here please"))
+
+    def test_real_looking_tokens_pass(self):
+        classic = "gho_" + "x" * 36
+        fine_grained = "github_pat_" + "x" * 60
+        hex40 = "0123456789abcdef0123456789abcdef01234567"
+        self.assertEqual(GitHubAutoUpdater._sanitize_token(classic), classic)
+        self.assertEqual(GitHubAutoUpdater._sanitize_token(fine_grained), fine_grained)
+        self.assertEqual(GitHubAutoUpdater._sanitize_token(hex40), hex40)
+
+    def test_surrounding_whitespace_is_stripped(self):
+        classic = "ghp_" + "y" * 36
+        self.assertEqual(GitHubAutoUpdater._sanitize_token(f"  {classic}\n"), classic)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -148,10 +148,27 @@ class GitHubAutoUpdater:
         self.executable_name = self.config['executable_name']
         self.check_interval_hours = self.config['check_interval_hours']
         self.silent_mode = self.config.get('silent_mode', True)
-        self.github_token = self.config.get('github_token')
+        self.github_token = self._sanitize_token(self.config.get('github_token'))
         self.task_scheduler_name = self.config.get('task_scheduler_name', '').strip()
         self.api_url = f"https://api.github.com/repos/{self.repo_owner}/{self.repo_name}/releases/latest"
-    
+
+    @staticmethod
+    def _sanitize_token(token) -> Optional[str]:
+        """Return a usable GitHub token or None.
+
+        A placeholder left in a deployed config (e.g. "PASTE_NEW_GITHUB_TOKEN_HERE")
+        must NOT be sent as an Authorization header: GitHub answers 401 to a bad
+        token, which kills the update check entirely — strictly worse than the
+        anonymous 60 req/hr it would get with no header at all.
+        """
+        tok = (token or "").strip()
+        if not tok:
+            return None
+        if "PASTE" in tok.upper() or " " in tok or len(tok) < 20:
+            logger.warning("github_token looks like a placeholder — ignoring it (anonymous API)")
+            return None
+        return tok
+
     def _setup_paths(self):
         if getattr(sys, 'frozen', False):
             self.app_dir = Path(sys.executable).parent

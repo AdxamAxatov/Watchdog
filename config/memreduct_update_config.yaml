@@ -33,4 +33,6 @@ task_scheduler_name: ""
 github_api_timeout: 10
 download_timeout: 60
 
-github_token: "PASTE_NEW_GITHUB_TOKEN_HERE"
+# Per-machine GitHub PAT — optional. Empty = anonymous API (60 req/hr/IP);
+# paste a real token to raise it to 5000 req/hr. NEVER commit a real token.
+github_token: ""
