@@ -84,3 +84,70 @@ class EscalationLadder:
                 self.state["consecutive_unhealthy"] = 0
         self._save()
         return actions
+
+
+# ---- HTTP control plane (consumed by Sherlock Homeless) ---------------------
+
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+_ACTION_ROUTES = {
+    "restart-windowchecker": ("restart_windowchecker", False),
+    "run-health-check": ("run_health_check", False),
+    "reboot": ("reboot", False),
+    "restart-watchdog": ("run_watchdog_task", True),   # True -> takes <user> path arg
+}
+
+
+def make_api_server(host, port, token, status_provider, action_executor):
+    """Token-authed JSON API. GET /status; POST /action/<route>[/<arg>].
+    Silence-is-unhealthy contract: Sherlock treats a timeout as the alert,
+    so this server never needs outbound connectivity."""
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *a):  # quiet — agent has its own log
+            pass
+
+        def _send(self, code, payload):
+            body = json.dumps(payload).encode("utf-8")
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _authed(self):
+            if self.headers.get("X-Farm-Token") != token:
+                self._send(401, {"error": "bad token"})
+                return False
+            return True
+
+        def do_GET(self):
+            if not self._authed():
+                return
+            if self.path.rstrip("/") == "/status":
+                try:
+                    self._send(200, status_provider())
+                except Exception as e:
+                    self._send(500, {"error": str(e)})
+            else:
+                self._send(404, {"error": "unknown route"})
+
+        def do_POST(self):
+            if not self._authed():
+                return
+            parts = [p for p in self.path.split("/") if p]
+            if len(parts) >= 2 and parts[0] == "action" and parts[1] in _ACTION_ROUTES:
+                name, takes_arg = _ACTION_ROUTES[parts[1]]
+                arg = parts[2] if (takes_arg and len(parts) > 2) else None
+                if takes_arg and not arg:
+                    self._send(400, {"error": "missing argument"})
+                    return
+                try:
+                    self._send(200, action_executor(name, arg) if takes_arg
+                               else action_executor(name))
+                except Exception as e:
+                    self._send(500, {"error": str(e)})
+            else:
+                self._send(404, {"error": "unknown route"})
+
+    return ThreadingHTTPServer((host, port), Handler)
