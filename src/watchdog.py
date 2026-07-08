@@ -227,6 +227,70 @@ def ensure_normalized(hwnd: int) -> None:
     except Exception:
         pass
 
+# Foreground-stealing nags that block the panel's first-run clicks. The SCOOBE
+# "finish setting up your device / Microsoft account" popup (UserOOBEBroker) is
+# the confirmed fleet-wide culprit; the rest are its common UWP hosts. These are
+# safe to kill — they respawn harmlessly and are never part of the farm stack.
+_BLOCKER_KILL_ALLOWLIST = {
+    "useroobebroker.exe", "applicationframehost.exe", "systemsettings.exe",
+    "wwahost.exe", "peopleapp.exe", "microsoft.aad.brokerplugin.exe",
+    "accountscontrolhost.exe", "shellexperiencehost.exe",
+}
+# Never kill these even if they hold the foreground — killing them breaks the box.
+_BLOCKER_NEVER_KILL = {
+    "explorer.exe", "dwm.exe", "winlogon.exe", "csrss.exe", "cs2.exe",
+    "steam.exe", "rdpclip.exe", "watchdog.exe", "windowchecker.exe",
+}
+
+
+def dismiss_focus_blocker(target_hwnd: int, log=None) -> bool:
+    """If a known-safe nag window (SCOOBE / account popup) currently holds the
+    foreground and is blocking `target_hwnd`, kill its process so focus can be
+    reclaimed. Returns True if a blocker was killed.
+
+    Strictly allowlisted: only image names in _BLOCKER_KILL_ALLOWLIST are killed,
+    never the panel / shell / farm processes. This fixes the CLASS — any future
+    focus-stealer with a known nag host is cleared automatically."""
+    try:
+        fg = win32gui.GetForegroundWindow()
+        if not fg or fg == target_hwnd:
+            return False
+        _, pid = win32process.GetWindowThreadProcessId(fg)
+        if not pid:
+            return False
+        try:
+            image = psutil.Process(pid).name().lower()
+        except Exception:
+            return False
+        # Never touch the panel's own process or protected system/farm processes.
+        try:
+            _, tpid = win32process.GetWindowThreadProcessId(target_hwnd)
+            if pid == tpid:
+                return False
+        except Exception:
+            pass
+        if image in _BLOCKER_NEVER_KILL:
+            if log:
+                log.warning("Focus blocker %r is protected — NOT killing (manual clear needed)", image)
+            return False
+        if image not in _BLOCKER_KILL_ALLOWLIST:
+            if log:
+                log.warning("Focus blocker %r not in kill allowlist — leaving it (title=%r)",
+                            image, win32gui.GetWindowText(fg))
+            return False
+        subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
+                       capture_output=True, timeout=10)
+        if log:
+            log.warning("Killed focus blocker %r (pid=%d) blocking panel first-run", image, pid)
+        print(f"   🔫 Killed focus blocker: {image} (pid={pid})")
+        time.sleep(0.6)
+        return True
+    except Exception as e:
+        if log:
+            log.warning("dismiss_focus_blocker failed: %s", e)
+        return False
+
+
 def run_panel_first_run_if_needed(hwnd: int, regions: dict, log=None, force: bool = False) -> bool:
     """
     Runs first-run onboarding clicks for panel if OCR detects first-run keywords
@@ -272,12 +336,15 @@ def run_panel_first_run_if_needed(hwnd: int, regions: dict, log=None, force: boo
     # Force focus via AttachThreadInput trick (bypasses Windows focus-stealing block)
     print("🎯 Forcing window to foreground...")
     if not force_foreground(hwnd, tries=8, sleep_s=0.2):
-        fg = win32gui.GetForegroundWindow()
-        fg_title = win32gui.GetWindowText(fg) if fg else ""
-        print(f"❌ Failed to focus panel — blocked by hwnd={fg} title={fg_title!r}")
-        if log:
-            log.error("Could not focus panel for first-run — blocker hwnd=%s title=%r", fg, fg_title)
-        return False
+        # A SCOOBE / account nag may be holding the foreground — kill it and retry.
+        killed = dismiss_focus_blocker(hwnd, log)
+        if not (killed and force_foreground(hwnd, tries=8, sleep_s=0.2)):
+            fg = win32gui.GetForegroundWindow()
+            fg_title = win32gui.GetWindowText(fg) if fg else ""
+            print(f"❌ Failed to focus panel — blocked by hwnd={fg} title={fg_title!r}")
+            if log:
+                log.error("Could not focus panel for first-run — blocker hwnd=%s title=%r", fg, fg_title)
+            return False
 
     print("   ✅ Window focused successfully")
     time.sleep(0.5)  # Extra settle time
@@ -326,12 +393,14 @@ def run_panel_first_run_if_needed(hwnd: int, regions: dict, log=None, force: boo
             if log:
                 log.warning("Panel lost focus before click %d, re-focusing", i)
             if not force_foreground(hwnd, tries=5, sleep_s=0.2):
-                fg = win32gui.GetForegroundWindow()
-                fg_title = win32gui.GetWindowText(fg) if fg else ""
-                print(f"   ❌ Failed to regain focus — blocked by hwnd={fg} title={fg_title!r}")
-                if log:
-                    log.error("Could not regain focus for click %d — blocker hwnd=%s title=%r", i, fg, fg_title)
-                return False
+                killed = dismiss_focus_blocker(hwnd, log)
+                if not (killed and force_foreground(hwnd, tries=5, sleep_s=0.2)):
+                    fg = win32gui.GetForegroundWindow()
+                    fg_title = win32gui.GetWindowText(fg) if fg else ""
+                    print(f"   ❌ Failed to regain focus — blocked by hwnd={fg} title={fg_title!r}")
+                    if log:
+                        log.error("Could not regain focus for click %d — blocker hwnd=%s title=%r", i, fg, fg_title)
+                    return False
             print(f"   ✅ Focus regained, continuing...")
     
         x_pct = float(step.get("x_pct", step.get("x")))
@@ -803,12 +872,14 @@ def check_cs2_instance_count(hwnd, regions, expected=4, log=None):
     try:
         ensure_normalized(hwnd)
         if not force_foreground(hwnd, tries=8, sleep_s=0.2):
-            fg = win32gui.GetForegroundWindow()
-            fg_title = win32gui.GetWindowText(fg) if fg else ""
-            if log:
-                log.error("CS2 fix: could not focus panel — blocker hwnd=%s title=%r", fg, fg_title)
-            print(f"CS2 fix: failed to focus panel (blocked by hwnd={fg} title={fg_title!r}) — aborting click")
-            return False
+            killed = dismiss_focus_blocker(hwnd, log)
+            if not (killed and force_foreground(hwnd, tries=8, sleep_s=0.2)):
+                fg = win32gui.GetForegroundWindow()
+                fg_title = win32gui.GetWindowText(fg) if fg else ""
+                if log:
+                    log.error("CS2 fix: could not focus panel — blocker hwnd=%s title=%r", fg, fg_title)
+                print(f"CS2 fix: failed to focus panel (blocked by hwnd={fg} title={fg_title!r}) — aborting click")
+                return False
         time.sleep(0.5)
 
         cl, ct, cr, cb = win32gui.GetClientRect(hwnd)
